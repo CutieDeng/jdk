@@ -603,6 +603,12 @@ class PhaseCFG : public Phase {
   // Returns true on success
   bool do_global_code_motion();
 
+#ifdef AARCH64
+  // Put a write prefetch before loads whose address is stored to later
+  // (UsePrefetchStore).  Runs between GCM and register allocation.
+  void insert_prefetch_store();
+#endif
+
   // Compute the (backwards) latency of a node from the uses
   void latency_from_uses(Node *n);
 

@@ -2790,6 +2790,36 @@ typedef void (MacroAssembler::* mem_vector_insn)(FloatRegister Rt,
     }
   }
 
+//=============================================================================
+
+#ifndef PRODUCT
+void MachPrefetchStoreNode::format(PhaseRegAlloc* ra_, outputStream* st) const {
+  st->print_raw("prfm ");
+  _opnds[1]->ext_format(ra_, this, operand_index(1), st);
+  st->print_raw(", PSTL1KEEP\t# Prefetch for store");
+}
+#endif
+
+void MachPrefetchStoreNode::emit(CodeBuffer& cbuf, PhaseRegAlloc* ra_) const {
+  C2_MacroAssembler _masm(&cbuf);
+  const MachOper* mem = _opnds[1];
+  int idx = operand_index(1);
+  Register base = as_Register(mem->base(ra_, this, idx));
+  int index = mem->index(ra_, this, idx);
+  int scale = mem->scale();
+  int disp = mem->disp(ra_, this, idx);
+  // The load's address.  PRFM is a doubleword access for the immediate
+  // offset ranges, and its register offset can only be shifted by 0 or 3.
+  Address addr = mem2address(mem->opcode(), base, index, scale, disp);
+  if (addr.getMode() == Address::base_plus_offset) {
+    addr = __ legitimize_address(addr, 8, rscratch1);
+  } else if (scale != 0 && scale != 3) {
+    __ lea(rscratch1, addr);
+    addr = Address(rscratch1);
+  }
+  __ prfm(addr, PSTL1KEEP);
+}
+
 %}
 
 

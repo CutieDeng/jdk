@@ -117,6 +117,10 @@ define_pd_global(intx, InlineSmallCode,          1000);
           "Use prfm hint with specified distance in compiled code."     \
           "Value -1 means off.")                                        \
           range(-1, 4096)                                               \
+  product(bool, UsePrefetchStore, false, EXPERIMENTAL,                  \
+          "In C2 code, issue PRFM PSTL1KEEP before a load whose address "\
+          "is stored to later in the same block, so that the cache line "\
+          "is requested in a writable state once instead of twice")     \
   product(ccstr, OnSpinWaitInst, "none", DIAGNOSTIC,                    \
           "The instruction to use to implement "                        \
           "java.lang.Thread.onSpinWait()."                              \

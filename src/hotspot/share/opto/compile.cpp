@@ -2926,6 +2926,14 @@ void Compile::Code_Gen() {
       return;
     }
 
+#ifdef AARCH64
+    // Block order and in-block schedule are final from here on; the
+    // prefetches are not moved again.
+    if (UsePrefetchStore && method() != nullptr) {
+      cfg.insert_prefetch_store();
+    }
+#endif
+
     print_method(PHASE_GLOBAL_CODE_MOTION, 2);
     NOT_PRODUCT( verify_graph_edges(); )
     cfg.verify();

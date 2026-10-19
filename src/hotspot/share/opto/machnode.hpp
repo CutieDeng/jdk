@@ -545,6 +545,33 @@ public:
 #endif
 };
 
+#ifdef AARCH64
+//------------------------------MachPrefetchStoreNode--------------------------
+// Write-intent prefetch placed right before a load whose address is stored to
+// later (UsePrefetchStore).  Inserted after GCM, so it is never matched: it
+// takes a copy of the load's memory operand and the load's address inputs, and
+// defines nothing.  emit() is in the .ad file.
+class MachPrefetchStoreNode : public MachIdealNode {
+private:
+  MachOper* _opnd_array[2];
+public:
+  MachPrefetchStoreNode(const MachNode* load);
+  virtual uint size_of() const { return sizeof(*this); }
+  virtual uint oper_input_base() const { return 1; }
+  // Not Type::MEMORY: the prefetch does not write memory, and memory writers
+  // must not be placed deeper in a loop nest than their control.
+  virtual const class Type* bottom_type() const { return Type::ABIO; }
+  virtual uint ideal_reg() const { return NotAMachineReg; }
+  virtual const RegMask& out_RegMask() const { return RegMask::Empty; }
+  virtual const MachOper* memory_operand() const { return _opnds[1]; }
+  virtual void emit(CodeBuffer& cbuf, PhaseRegAlloc* ra_) const;
+#ifndef PRODUCT
+  virtual const char* Name() const { return "PrefetchStore"; }
+  virtual void format(PhaseRegAlloc* ra_, outputStream* st) const;
+#endif
+};
+#endif // AARCH64
+
 //------------------------------MachNopNode-----------------------------------
 // Machine function Nop Node
 class MachNopNode : public MachIdealNode {
