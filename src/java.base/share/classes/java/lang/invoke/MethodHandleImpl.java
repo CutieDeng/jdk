@@ -1660,6 +1660,12 @@ abstract class MethodHandleImpl {
             public Class<?>[] exceptionTypes(MethodHandle handle) {
                 return VarHandles.exceptionTypes(handle);
             }
+
+            @Override
+            public Class<?> defineFusionTrustedHiddenClass(MethodHandles.Lookup lookup, byte[] bytes)
+                    throws IllegalAccessException {
+                return lookup.defineFusionTrustedHiddenClass(bytes);
+            }
         });
     }
 

@@ -321,6 +321,9 @@ class InstanceKlass: public Klass {
 
   void set_shared_loading_failed() { _misc_flags.set_shared_loading_failed(true); }
 
+  bool is_fusion_trusted() const { return _misc_flags.is_fusion_trusted(); }
+  void set_is_fusion_trusted(bool b) { _misc_flags.set_is_fusion_trusted(b); }
+
 #if INCLUDE_CDS
   void set_shared_class_loader_type(s2 loader_type) { _misc_flags.set_shared_class_loader_type(loader_type); }
   void assign_class_loader_type() { _misc_flags.assign_class_loader_type(_class_loader_data); }

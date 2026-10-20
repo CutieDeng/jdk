@@ -173,4 +173,12 @@ public interface JavaLangInvokeAccess {
      * @return an array of exceptions, or {@code null}.
      */
     Class<?>[] exceptionTypes(MethodHandle handle);
+
+    /**
+     * FilterFusion: define a hidden class, in the package of the lookup class, whose
+     * access checks the VM bypasses. Requires -XX:+FilterFusion, otherwise
+     * UnsupportedOperationException.
+     */
+    Class<?> defineFusionTrustedHiddenClass(Lookup lookup, byte[] bytes)
+            throws IllegalAccessException;
 }

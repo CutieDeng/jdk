@@ -117,7 +117,8 @@ class MethodHandleNatives {
             NESTMATE_CLASS            = 0x00000001,
             HIDDEN_CLASS              = 0x00000002,
             STRONG_LOADER_LINK        = 0x00000004,
-            ACCESS_VM_ANNOTATIONS     = 0x00000008;
+            ACCESS_VM_ANNOTATIONS     = 0x00000008,
+            SKIP_ACCESS_CHECKS        = 0x00000040;
 
         /**
          * Lookup modes

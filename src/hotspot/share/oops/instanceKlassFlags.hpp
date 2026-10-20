@@ -55,6 +55,7 @@ class InstanceKlassFlags {
     flag(has_miranda_methods                , 1 << 12) /* True if this class has miranda methods in it's vtable */ \
     flag(has_vanilla_constructor            , 1 << 13) /* True if klass has a vanilla default constructor */ \
     flag(has_final_method                   , 1 << 14) /* True if klass has final method */ \
+    flag(is_fusion_trusted                  , 1 << 15) /* FilterFusion: bypass access checks */ \
     /* end of list */
 
 #define IK_FLAGS_ENUM_NAME(name, value)    _misc_##name = value,

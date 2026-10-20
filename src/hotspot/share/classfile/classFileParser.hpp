@@ -115,6 +115,7 @@ class ClassFileParser {
   mutable ClassLoaderData* _loader_data;
   const bool _is_hidden;
   const bool _can_access_vm_annotations;
+  const bool _skip_access_checks;
   int _orig_cp_size;
 
   // Metadata created before the instance klass is created.  Must be deallocated

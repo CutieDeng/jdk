@@ -58,6 +58,7 @@ class ClassLoadInfo : public StackObj {
   bool                   _is_hidden;
   bool                   _is_strong_hidden;
   bool                   _can_access_vm_annotations;
+  bool                   _skip_access_checks;
 
  public:
   ClassLoadInfo(Handle protection_domain) {
@@ -67,17 +68,20 @@ class ClassLoadInfo : public StackObj {
     _is_hidden = false;
     _is_strong_hidden = false;
     _can_access_vm_annotations = false;
+    _skip_access_checks = false;
   }
 
   ClassLoadInfo(Handle protection_domain, InstanceKlass* dynamic_nest_host,
                 Handle class_data, bool is_hidden, bool is_strong_hidden,
-                bool can_access_vm_annotations) {
+                bool can_access_vm_annotations,
+                bool skip_access_checks = false) {
     _protection_domain = protection_domain;
     _class_hidden_info._dynamic_nest_host = dynamic_nest_host;
     _class_hidden_info._class_data = class_data;
     _is_hidden = is_hidden;
     _is_strong_hidden = is_strong_hidden;
     _can_access_vm_annotations = can_access_vm_annotations;
+    _skip_access_checks = skip_access_checks;
   }
 
   Handle protection_domain()             const { return _protection_domain; }
@@ -85,6 +89,7 @@ class ClassLoadInfo : public StackObj {
   bool is_hidden()                       const { return _is_hidden; }
   bool is_strong_hidden()                const { return _is_strong_hidden; }
   bool can_access_vm_annotations()       const { return _can_access_vm_annotations; }
+  bool skip_access_checks()              const { return _skip_access_checks; }
 };
 
 #endif // SHARE_CLASSFILE_CLASSLOADINFO_HPP

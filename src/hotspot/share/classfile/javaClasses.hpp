@@ -1316,6 +1316,7 @@ class java_lang_invoke_MemberName: AllStatic {
     MN_HIDDEN_CLASS          = 0x00000002,
     MN_STRONG_LOADER_LINK    = 0x00000004,
     MN_ACCESS_VM_ANNOTATIONS = 0x00000008,
+    MN_SKIP_ACCESS_CHECKS    = 0x00000040, // FilterFusion: hidden class bypasses access checks
     // Lookup modes
     MN_MODULE_MODE           = 0x00000010,
     MN_UNCONDITIONAL_MODE    = 0x00000020,

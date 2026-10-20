@@ -2456,6 +2456,22 @@ public class MethodHandles {
             return new ClassDefiner(this, cf, flags, dumper);
         }
 
+        /**
+         * FilterFusion: defines a hidden nestmate class whose member/class access checks are
+         * bypassed by the VM (InstanceKlass::is_fusion_trusted). Only reachable through
+         * jdk.internal.fusion.FusionDefiner; the VM rejects the flag unless -XX:+FilterFusion.
+         */
+        Class<?> defineFusionTrustedHiddenClass(byte[] bytes) throws IllegalAccessException {
+            Objects.requireNonNull(bytes);
+            ensureDefineClassPermission();
+            if (!hasFullPrivilegeAccess()) {
+                throw new IllegalAccessException(this + " does not have full privilege access");
+            }
+            ClassFile cf = ClassFile.newInstance(bytes.clone(), lookupClass().getPackageName());
+            int flags = HIDDEN_CLASS | NESTMATE_CLASS | SKIP_ACCESS_CHECKS;
+            return new ClassDefiner(this, cf, flags, defaultDumper()).defineClass(false);
+        }
+
         static class ClassDefiner {
             private final Lookup lookup;
             private final String name;  // internal name

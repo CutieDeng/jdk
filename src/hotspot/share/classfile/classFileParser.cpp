@@ -5263,6 +5263,9 @@ void ClassFileParser::fill_instance_klass(InstanceKlass* ik,
 
   if (_is_hidden) {
     ik->set_is_hidden();
+    if (_skip_access_checks && FilterFusion) {
+      ik->set_is_fusion_trusted(true);
+    }
   }
 
   // Set PackageEntry for this_klass
@@ -5448,6 +5451,7 @@ ClassFileParser::ClassFileParser(ClassFileStream* stream,
   _loader_data(loader_data),
   _is_hidden(cl_info->is_hidden()),
   _can_access_vm_annotations(cl_info->can_access_vm_annotations()),
+  _skip_access_checks(cl_info->skip_access_checks()),
   _orig_cp_size(0),
   _super_klass(),
   _cp(nullptr),

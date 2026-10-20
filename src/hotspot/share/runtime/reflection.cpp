@@ -448,6 +448,10 @@ Reflection::VerifyClassAccessResults Reflection::verify_class_access(
       is_same_class_package(current_class, new_class)) {
     return ACCESS_OK;
   }
+  if (FilterFusion && current_class->is_instance_klass() &&
+      InstanceKlass::cast(const_cast<Klass*>(current_class))->is_fusion_trusted()) {
+    return ACCESS_OK;
+  }
   // Allow all accesses from jdk/internal/reflect/MagicAccessorImpl subclasses to
   // succeed trivially.
   if (vmClasses::reflect_MagicAccessorImpl_klass_is_loaded() &&
@@ -621,6 +625,10 @@ bool Reflection::verify_member_access(const Klass* current_class,
   if ((current_class == nullptr) ||
       (current_class == member_class) ||
       access.is_public()) {
+    return true;
+  }
+  if (FilterFusion && current_class->is_instance_klass() &&
+      InstanceKlass::cast(const_cast<Klass*>(current_class))->is_fusion_trusted()) {
     return true;
   }
 

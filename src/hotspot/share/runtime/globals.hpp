@@ -174,6 +174,10 @@ const int ObjectAlignmentInBytes = 8;
   product(bool, AlwaysSafeConstructors, false, EXPERIMENTAL,                \
           "Force safe construction, as if all fields are final.")           \
                                                                             \
+  product(bool, FilterFusion, false, EXPERIMENTAL,                          \
+          "Allow jdk.internal.fusion.FusionDefiner to define hidden classes "\
+          "that bypass member/class access checks (Servlet filter fusion)") \
+                                                                            \
   product(bool, UnlockDiagnosticVMOptions, trueInDebug, DIAGNOSTIC,         \
           "Enable normal processing of flags relating to field diagnostics")\
                                                                             \

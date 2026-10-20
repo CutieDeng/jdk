@@ -921,7 +921,8 @@ enum {
   NESTMATE              = java_lang_invoke_MemberName::MN_NESTMATE_CLASS,
   HIDDEN_CLASS          = java_lang_invoke_MemberName::MN_HIDDEN_CLASS,
   STRONG_LOADER_LINK    = java_lang_invoke_MemberName::MN_STRONG_LOADER_LINK,
-  ACCESS_VM_ANNOTATIONS = java_lang_invoke_MemberName::MN_ACCESS_VM_ANNOTATIONS
+  ACCESS_VM_ANNOTATIONS = java_lang_invoke_MemberName::MN_ACCESS_VM_ANNOTATIONS,
+  SKIP_ACCESS_CHECKS    = java_lang_invoke_MemberName::MN_SKIP_ACCESS_CHECKS
 };
 
 /*
@@ -946,6 +947,11 @@ static jclass jvm_lookup_define_class(jclass lookup, const char *name,
   bool is_hidden = (flags & HIDDEN_CLASS) == HIDDEN_CLASS;
   bool is_strong = (flags & STRONG_LOADER_LINK) == STRONG_LOADER_LINK;
   bool vm_annotations = (flags & ACCESS_VM_ANNOTATIONS) == ACCESS_VM_ANNOTATIONS;
+  bool skip_access_checks = (flags & SKIP_ACCESS_CHECKS) == SKIP_ACCESS_CHECKS;
+  if (skip_access_checks && !FilterFusion) {
+    THROW_MSG_0(vmSymbols::java_lang_UnsupportedOperationException(),
+                "SKIP_ACCESS_CHECKS requires -XX:+FilterFusion");
+  }
 
   InstanceKlass* host_class = nullptr;
   if (is_nestmate) {
@@ -973,6 +979,9 @@ static jclass jvm_lookup_define_class(jclass lookup, const char *name,
     }
     if (vm_annotations) {
       THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(), "vm annotations only allowed for hidden classes");
+    }
+    if (skip_access_checks) {
+      THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(), "skip access checks only allowed for hidden classes");
     }
     if (flags != STRONG_LOADER_LINK) {
       THROW_MSG_0(vmSymbols::java_lang_IllegalArgumentException(),
@@ -1007,7 +1016,8 @@ static jclass jvm_lookup_define_class(jclass lookup, const char *name,
                           classData_h,
                           is_hidden,
                           is_strong,
-                          vm_annotations);
+                          vm_annotations,
+                          skip_access_checks);
     ik = SystemDictionary::resolve_from_stream(&st, class_name,
                                                class_loader,
                                                cl_info,
