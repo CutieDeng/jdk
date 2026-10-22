@@ -62,6 +62,9 @@ abstract class MethodHandleFieldAccessorImpl extends FieldAccessorImpl {
             if (!field.getDeclaringClass().isAssignableFrom(o.getClass())) {
                 throwSetIllegalArgumentException(o);
             }
+            if (jdk.internal.util.NativeCollections.isGuardedField(field.getDeclaringClass(), false)) {
+                jdk.internal.util.NativeCollections.checkReceiver(o);
+            }
         }
     }
 

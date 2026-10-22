@@ -31,6 +31,7 @@
 #include "gc/shared/barrierSet.hpp"
 #include "jfr/support/jfrIntrinsics.hpp"
 #include "memory/resourceArea.hpp"
+#include "oops/instanceSwissTableBufferKlass.hpp"
 #include "oops/klass.inline.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "opto/addnode.hpp"
@@ -50,6 +51,7 @@
 #include "opto/runtime.hpp"
 #include "opto/rootnode.hpp"
 #include "opto/subnode.hpp"
+#include "opto/vectornode.hpp"
 #include "prims/jvmtiThreadState.hpp"
 #include "prims/unsafe.hpp"
 #include "runtime/jniHandles.inline.hpp"
@@ -502,6 +504,9 @@ bool LibraryCallKit::try_to_inline(int predicate) {
   case vmIntrinsics::_writebackPreSync0:        return inline_unsafe_writebackSync0(true);
   case vmIntrinsics::_writebackPostSync0:       return inline_unsafe_writebackSync0(false);
   case vmIntrinsics::_allocateInstance:         return inline_unsafe_allocate();
+  case vmIntrinsics::_swissTableBufferAllocate:       return inline_swiss_table_buffer_allocate();
+  case vmIntrinsics::_swissMatchTag:            return inline_swiss_match_tag(false);
+  case vmIntrinsics::_swissFirstTagLane:        return inline_swiss_match_tag(true);
   case vmIntrinsics::_copyMemory:               return inline_unsafe_copyMemory();
   case vmIntrinsics::_getLength:                return inline_native_getLength();
   case vmIntrinsics::_copyOf:                   return inline_array_copyOf(false);
@@ -2867,6 +2872,112 @@ bool LibraryCallKit::inline_unsafe_allocate() {
   return true;
 }
 
+//------------------------inline_swiss_table_buffer_allocate----------------------
+// java.util.SwissTableBuffer.allocate(int capacity): the single storage buffer of a native HashMap
+// (-XX:+UseSwissTable), a variable-sized instance (InstanceSwissTableBufferKlass). Allocated like an
+// array: a TLAB fast path for valid capacities below 2^16 (0, or a power of two of at least 8),
+// which writes the header and clears the body (control bytes EMPTY, references null); anything
+// else, and a full TLAB, goes to OptoRuntime::new_swiss_table_buffer_C, which rejects invalid capacities.
+// The capacity rides in the AllocateNode's length input to reach the slow path (see
+// PhaseMacroExpand::expand_allocate). The fast path does not write it there: it is stored below as
+// an ordinary field store, which the InitializeNode captures, so that it is written before the
+// object is published and so that loads of the field in this compilation see it rather than the
+// zero of a fresh allocation.
+bool LibraryCallKit::inline_swiss_table_buffer_allocate() {
+  ciInstanceKlass* ik = C->env()->SwissTableBuffer_klass();
+  if (ik == nullptr || !ik->is_loaded() || !ik->is_initialized()) {
+    return false;
+  }
+  ciField* capacity_field = ik->get_field_by_offset(InstanceSwissTableBufferKlass::capacity_offset(), false);
+  if (capacity_field == nullptr) {
+    return false;
+  }
+  Node* capacity = argument(0);
+
+  // slow unless capacity is 0 or a power of two >= 8, below 2^16:
+  // capacity & ((capacity - 1) | 7) is 0 exactly for 0 and powers of two >= 8;
+  // capacity >>> 16 is 0 exactly for 0 <= capacity < 2^16
+  Node* low_bits  = _gvn.transform(new OrINode(_gvn.transform(new SubINode(capacity, intcon(1))), intcon(7)));
+  Node* invalid   = _gvn.transform(new AndINode(capacity, low_bits));
+  Node* too_big   = _gvn.transform(new URShiftINode(capacity, intcon(16)));
+  Node* bad_bits  = _gvn.transform(new OrINode(invalid, too_big));
+  Node* slow_cmp  = _gvn.transform(new CmpINode(bad_bits, intcon(0)));
+  Node* slow_test = _gvn.transform(new BoolNode(slow_cmp, BoolTest::ne));
+
+  // size in bytes: the fixed part (word aligned), then one control byte and two references per slot,
+  // rounded up to the object alignment like InstanceSwissTableBufferKlass::instance_size (a no-op for
+  // valid capacities unless ObjectAlignmentInBytes > 8)
+  const int ctrl_base = ik->size_helper() << LogHeapWordSize;
+  Node* bytes = _gvn.transform(new MulXNode(ConvI2X(capacity), MakeConX(1 + 2 * heapOopSize)));
+  Node* size  = _gvn.transform(new AddXNode(bytes, MakeConX(ctrl_base)));
+  if (MinObjAlignmentInBytes > BytesPerLong) {
+    Node* rounded = _gvn.transform(new AddXNode(size, MakeConX(MinObjAlignmentInBytes - 1)));
+    size = _gvn.transform(new AndXNode(rounded, MakeConX(~(intptr_t)(MinObjAlignmentInBytes - 1))));
+  }
+
+  Node* klass_node = makecon(TypeKlassPtr::make(ik));
+  const TypeOopPtr* oop_type = _gvn.type(klass_node)->is_klassptr()->as_instance_type();
+
+  Node* mem = reset_memory();
+  set_all_memory(mem); // Create new memory state
+  AllocateNode* alloc = new AllocateNode(C, AllocateNode::alloc_type(TypeInt::INT),
+                                         control(), mem, i_o(), size, klass_node, slow_test);
+  Node* obj = set_output_for_allocation(alloc, oop_type);
+  alloc->set_req(AllocateNode::ALength, capacity);    // marks the allocation as a SwissTableBuffer
+
+  Node* adr = basic_plus_adr(obj, capacity_field->offset_in_bytes());
+  const TypePtr* adr_type = C->alias_type(capacity_field)->adr_type();
+  store_to_memory(control(), adr, capacity, T_INT, adr_type, MemNode::unordered);
+  set_result(obj);
+  return true;
+}
+
+//------------------------inline_swiss_match_tag---------------------------
+// java.util.SwissTable.matchTagAt(SwissTableBuffer t, long ctrlOff, int tag): the lanes of the 8-byte
+// control group at ctrlOff of t that hold the control byte tag, as bit 8j + 7 for lane j.
+// The Java code computes it from the control word with SWAR; this intrinsic is the NEON form of
+// the standard Swiss table group: an 8-byte vector load, a byte compare with the broadcast tag,
+// the move of the mask to a general register (SwissGroupMatchNode). Like the other accesses to
+// the trailing data of a table, the load is pinned below the checks that bound ctrlOff.
+// first_lane: SwissTable.firstTagLaneAt(t, ctrlOff, tag), the trailing zero count of the raw
+// mask (SwissGroupMatchRawNode): 8j for the lowest equal lane j, 64 for none.
+bool LibraryCallKit::inline_swiss_match_tag(bool first_lane) {
+  if (!Matcher::match_rule_supported(first_lane ? Op_SwissGroupMatchRaw : Op_SwissGroupMatch) ||
+      (first_lane && !Matcher::match_rule_supported(Op_CountTrailingZerosL)) ||
+      !Matcher::match_rule_supported_vector(Op_LoadVector, 8, T_BYTE) ||
+      !Matcher::match_rule_supported_vector(Op_ReplicateB, 8, T_BYTE)) {
+    return false;
+  }
+  Node* table    = argument(0);
+  Node* ctrl_off = argument(1);   // long: arguments 1 and 2
+  Node* tag_byte = argument(3);
+
+  table = null_check(table);
+  if (stopped()) {
+    return true;
+  }
+  C->set_has_unsafe_access(true);  // the load is an Unsafe.getLong of the table data
+  Node* adr = basic_plus_adr(table, table, ctrl_off);
+  const TypePtr* adr_type = _gvn.type(adr)->isa_ptr();
+  assert(C->is_swiss_table_buffer_data(adr_type), "control bytes of a java.util.SwissTableBuffer");
+  Node* mem = memory(C->get_alias_index(adr_type));
+  LoadVectorNode* ld = LoadVectorNode::make(0, control(), mem, adr, adr_type, 8, T_BYTE, LoadNode::Pinned);
+  ld->set_mismatched_access();          // the alias class of table data mixes access sizes
+  Node* ctrl = _gvn.transform(ld);
+
+  const TypeVect* vt = TypeVect::make(T_BYTE, 8);
+  Node* tag = _gvn.transform(new ReplicateBNode(tag_byte, vt));
+  C->set_max_vector_size(MAX2(C->max_vector_size(), 8u));
+
+  if (first_lane) {
+    Node* mask = _gvn.transform(new SwissGroupMatchRawNode(ctrl, tag));
+    set_result(_gvn.transform(new CountTrailingZerosLNode(mask)));
+  } else {
+    set_result(_gvn.transform(new SwissGroupMatchNode(ctrl, tag)));
+  }
+  return true;
+}
+
 //------------------------inline_native_time_funcs--------------
 // inline code for System.currentTimeMillis() and System.nanoTime()
 // these have the same type and signature
@@ -4624,8 +4735,30 @@ bool LibraryCallKit::inline_native_hashcode(bool is_virtual, bool is_static) {
 bool LibraryCallKit::inline_native_getClass() {
   Node* obj = null_check_receiver();
   if (stopped())  return true;
-  set_result(load_mirror_from_klass(load_object_klass(obj)));
+  Node* kls = load_object_klass(obj);
+  if (UseSwissTable) {
+    kls = native_collection_reported_klass(kls);
+  }
+  set_result(load_mirror_from_klass(kls));
   return true;
+}
+
+// UseSwissTable: SwissTable reports its base class from getClass().
+// Branch-free selects; both fold away when the receiver's exact class is known.
+Node* LibraryCallKit::native_collection_reported_klass(Node* kls) {
+  ciInstanceKlass* pairs[][2] = {
+    { C->env()->SwissTable_klass(),  C->env()->HashMap_klass()   },
+  };
+  for (auto& pair : pairs) {
+    if (pair[0] == nullptr || pair[1] == nullptr) continue;
+    Node* native_con = makecon(TypeKlassPtr::make(pair[0]));
+    Node* base_con   = makecon(TypeKlassPtr::make(pair[1]));
+    Node* cmp = _gvn.transform(new CmpPNode(kls, native_con));
+    Node* bol = _gvn.transform(new BoolNode(cmp, BoolTest::eq));
+    const TypePtr* t = _gvn.type(kls)->meet_speculative(_gvn.type(base_con))->is_ptr();
+    kls = _gvn.transform(new CMovePNode(nullptr, bol, kls, base_con, t));
+  }
+  return kls;
 }
 
 //-----------------inline_native_Reflection_getCallerClass---------------------

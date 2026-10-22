@@ -998,6 +998,10 @@ void ConnectionGraph::add_call_node(CallNode* call) {
             // Not scalar replaceable if there are too many fields.
             scalar_replaceable = false;
             NOT_PRODUCT(nsr_reason = "has too many fields");
+          } else if (ik == _compile->env()->SwissTableBuffer_klass()) {
+            // Variable sized, with data beyond its fields that Unsafe accesses reach.
+            scalar_replaceable = false;
+            NOT_PRODUCT(nsr_reason = "is a variable-sized swiss table");
           }
         }
       }

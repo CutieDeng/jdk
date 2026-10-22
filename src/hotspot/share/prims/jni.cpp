@@ -265,6 +265,12 @@ void jfieldIDWorkaround::verify_instance_jfieldID(Klass* k, jfieldID id) {
 #endif
     }
   }
+  // A class laid out without its superclasses' instance fields (java.util.SwissTable, whose
+  // getClass() reports HashMap) does not contain what an inherited field ID addresses; the JNI
+  // field accessors check such accesses and throw IllegalArgumentException.
+  if (InstanceKlass::cast(k)->has_independent_layout()) {
+    return;
+  }
   guarantee(InstanceKlass::cast(k)->contains_field_offset(offset),
       "Bug in native code: jfieldID offset must address interior of object");
 }
@@ -1035,6 +1041,10 @@ JNI_ENTRY(jclass, jni_GetObjectClass(JNIEnv *env, jobject obj))
   HOTSPOT_JNI_GETOBJECTCLASS_ENTRY(env, obj);
 
   Klass* k = JNIHandles::resolve_non_null(obj)->klass();
+  if (UseSwissTable) {
+    // native collection representations present themselves as their base class
+    k = InstanceKlass::native_collection_reported_class(k);
+  }
   jclass ret =
     (jclass) JNIHandles::make_local(THREAD, k->java_mirror());
 
@@ -1782,6 +1792,39 @@ JNI_ENTRY(jfieldID, jni_GetFieldID(JNIEnv *env, jclass clazz,
 JNI_END
 
 
+// UseSwissTable: an instance of java.util.SwissTable holds only its own fields (see
+// ClassFileParser), while getClass() of it reports HashMap and a jfieldID carries only an offset.
+// A read is allowed only where the offset is one of its own fields of the same kind; every write
+// is rejected, since a value of an inherited field's type stored into its own fields would be a
+// type confusion.
+template <typename T> static BasicType jni_field_type()   { return T_OBJECT; }
+template <> BasicType jni_field_type<jboolean>()          { return T_BOOLEAN; }
+template <> BasicType jni_field_type<jbyte>()             { return T_BYTE; }
+template <> BasicType jni_field_type<jchar>()             { return T_CHAR; }
+template <> BasicType jni_field_type<jshort>()            { return T_SHORT; }
+template <> BasicType jni_field_type<jint>()              { return T_INT; }
+template <> BasicType jni_field_type<jlong>()             { return T_LONG; }
+template <> BasicType jni_field_type<jfloat>()            { return T_FLOAT; }
+template <> BasicType jni_field_type<jdouble>()           { return T_DOUBLE; }
+
+static bool independent_layout_field_ok(JavaThread* thread, Klass* k, int offset, BasicType type, bool is_write) {
+  if (!k->is_instance_klass() || !InstanceKlass::cast(k)->has_independent_layout()) {
+    return true;
+  }
+  if (!is_write) {
+    fieldDescriptor fd;
+    if (InstanceKlass::cast(k)->find_local_field_from_offset(offset, false, &fd)) {
+      BasicType ft = fd.field_type();
+      if (ft == type || (is_reference_type(ft) && is_reference_type(type))) {
+        return true;
+      }
+    }
+  }
+  Exceptions::_throw_msg(thread, __FILE__, __LINE__, vmSymbols::java_lang_IllegalArgumentException(),
+                         "JNI field access to a java.util.HashMap field of a native HashMap (-XX:+UseSwissTable)");
+  return false;
+}
+
 JNI_ENTRY(jobject, jni_GetObjectField(JNIEnv *env, jobject obj, jfieldID fieldID))
   HOTSPOT_JNI_GETOBJECTFIELD_ENTRY(env, obj, (uintptr_t) fieldID);
   oop o = JNIHandles::resolve_non_null(obj);
@@ -1789,6 +1832,9 @@ JNI_ENTRY(jobject, jni_GetObjectField(JNIEnv *env, jobject obj, jfieldID fieldID
   int offset = jfieldIDWorkaround::from_instance_jfieldID(k, fieldID);
   // Keep JVMTI addition small and only check enabled flag here.
   // jni_GetField_probe() assumes that is okay to create handles.
+  if (!independent_layout_field_ok(thread, k, offset, T_OBJECT, false)) {
+    return nullptr;
+  }
   if (JvmtiExport::should_post_field_access()) {
     o = JvmtiExport::jni_GetField_probe(thread, obj, o, k, fieldID, false);
   }
@@ -1815,6 +1861,9 @@ JNI_ENTRY_NO_PRESERVE(Return, jni_Get##Result##Field(JNIEnv *env, jobject obj, j
   oop o = JNIHandles::resolve_non_null(obj); \
   Klass* k = o->klass(); \
   int offset = jfieldIDWorkaround::from_instance_jfieldID(k, fieldID);  \
+  if (!independent_layout_field_ok(thread, k, offset, jni_field_type<Return>(), false)) { \
+    return ret; \
+  } \
   /* Keep JVMTI addition small and only check enabled flag here.       */ \
   if (JvmtiExport::should_post_field_access()) { \
     o = JvmtiExport::jni_GetField_probe(thread, obj, o, k, fieldID, false); \
@@ -1879,6 +1928,9 @@ JNI_ENTRY_NO_PRESERVE(void, jni_SetObjectField(JNIEnv *env, jobject obj, jfieldI
   oop o = JNIHandles::resolve_non_null(obj);
   Klass* k = o->klass();
   int offset = jfieldIDWorkaround::from_instance_jfieldID(k, fieldID);
+  if (!independent_layout_field_ok(thread, k, offset, T_OBJECT, true)) {
+    return;
+  }
   // Keep JVMTI addition small and only check enabled flag here.
   if (JvmtiExport::should_post_field_modification()) {
     jvalue field_value;
@@ -1900,6 +1952,9 @@ JNI_ENTRY_NO_PRESERVE(void, jni_Set##Result##Field(JNIEnv *env, jobject obj, jfi
   oop o = JNIHandles::resolve_non_null(obj); \
   Klass* k = o->klass(); \
   int offset = jfieldIDWorkaround::from_instance_jfieldID(k, fieldID);  \
+  if (!independent_layout_field_ok(thread, k, offset, T_ILLEGAL, true)) { \
+    return; \
+  } \
   /* Keep JVMTI addition small and only check enabled flag here.       */ \
   if (JvmtiExport::should_post_field_modification()) { \
     jvalue field_value; \
@@ -3418,8 +3473,9 @@ void copy_jni_function_table(const struct JNINativeInterface_ *new_jni_NativeInt
 }
 
 void quicken_jni_functions() {
-  // Replace Get<Primitive>Field with fast versions
-  if (UseFastJNIAccessors && !VerifyJNIFields && !CheckJNICalls) {
+  // Replace Get<Primitive>Field with fast versions. Not with UseSwissTable: the fast
+  // versions read at the field offset without the check that a native HashMap has the field.
+  if (UseFastJNIAccessors && !VerifyJNIFields && !CheckJNICalls && !UseSwissTable) {
     address func;
     func = JNI_FastGetField::generate_fast_get_boolean_field();
     if (func != (address)-1) {

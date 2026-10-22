@@ -782,6 +782,9 @@
   template(jdk_internal_misc_CDS,                           "jdk/internal/misc/CDS")                              \
   template(java_util_concurrent_ConcurrentHashMap,          "java/util/concurrent/ConcurrentHashMap")             \
   template(java_util_ArrayList,                             "java/util/ArrayList")                                \
+  template(java_util_HashMap,                               "java/util/HashMap")                                  \
+  template(java_util_SwissTable,                            "java/util/SwissTable")                               \
+  template(java_util_SwissTableBuffer,                      "java/util/SwissTableBuffer")                         \
   template(toFileURL_name,                                  "toFileURL")                                          \
   template(toFileURL_signature,                             "(Ljava/lang/String;)Ljava/net/URL;")                 \
   template(url_void_signature,                              "(Ljava/net/URL;)V")                                  \

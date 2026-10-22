@@ -17244,6 +17244,43 @@ instruct count_positives(iRegP_R1 ary1, iRegI_R2 len, iRegI_R0 result, rFlagsReg
   ins_pipe( pipe_slow );
 %}
 
+// UseSwissTable: java.util.SwissTable group match (see SwissGroupMatchNode). The NEON
+// sequence of Abseil's GroupAArch64Impl::Match and hashbrown's neon Group::match_tag: compare the
+// 8 control bytes with the tag, move the 0xFF/0x00 lanes to a general register, keep bit 7 of
+// each lane (the bit SwissTable's lane arithmetic reads).
+instruct swissGroupMatch(iRegLNoSp dst, vReg ctrl, vReg tag, vReg tmp)
+%{
+  match(Set dst (SwissGroupMatch ctrl tag));
+  effect(TEMP tmp);
+  ins_cost(3 * INSN_COST);
+  format %{ "cmeq $tmp, $ctrl, $tag\t# 8B\n\t"
+            "fmov $dst, $tmp\n\t"
+            "and  $dst, $dst, 0x8080808080808080\t# swiss group match" %}
+  ins_encode %{
+    __ cm(Assembler::EQ, $tmp$$FloatRegister, __ T8B, $ctrl$$FloatRegister, $tag$$FloatRegister);
+    __ fmovd($dst$$Register, $tmp$$FloatRegister);
+    __ andr($dst$$Register, $dst$$Register, (uint64_t) 0x8080808080808080ULL);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
+// The raw form (see SwissGroupMatchRawNode): all 8 bits of an equal lane, for the trailing zero
+// count of the first lane (SwissTable.firstTagLaneAt), as Abseil's LowestBitSet on the
+// unmasked NEON compare.
+instruct swissGroupMatchRaw(iRegLNoSp dst, vReg ctrl, vReg tag, vReg tmp)
+%{
+  match(Set dst (SwissGroupMatchRaw ctrl tag));
+  effect(TEMP tmp);
+  ins_cost(2 * INSN_COST);
+  format %{ "cmeq $tmp, $ctrl, $tag\t# 8B\n\t"
+            "fmov $dst, $tmp\t# swiss group match, raw" %}
+  ins_encode %{
+    __ cm(Assembler::EQ, $tmp$$FloatRegister, __ T8B, $ctrl$$FloatRegister, $tag$$FloatRegister);
+    __ fmovd($dst$$Register, $tmp$$FloatRegister);
+  %}
+  ins_pipe(pipe_slow);
+%}
+
 // fast char[] to byte[] compression
 instruct string_compress(iRegP_R2 src, iRegP_R1 dst, iRegI_R3 len,
                          vRegD_V0 vtmp0, vRegD_V1 vtmp1, vRegD_V2 vtmp2,

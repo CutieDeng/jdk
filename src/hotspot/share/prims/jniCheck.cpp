@@ -278,6 +278,12 @@ checkInstanceFieldID(JavaThread* thr, jfieldID fid, jobject obj, int ftype)
   }
   Klass* k_oop = oopObj->klass();
 
+  /* a native HashMap (java.util.SwissTable) has none of HashMap's fields, which the field
+     IDs of its reported class address: the accessor itself checks and throws
+     IllegalArgumentException */
+  if (k_oop->is_instance_klass() && InstanceKlass::cast(k_oop)->has_independent_layout())
+    return;
+
   if (!jfieldIDWorkaround::is_valid_jfieldID(k_oop, fid)) {
     ReportJNIFatalError(thr, fatal_wrong_field);
   }

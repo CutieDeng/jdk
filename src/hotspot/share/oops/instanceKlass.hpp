@@ -812,6 +812,16 @@ public:
   }
   // allocation
   instanceOop allocate_instance(TRAPS);
+
+  // UseSwissTable: the class an allocation of exactly this class produces instead
+  // (SwissTable for HashMap), or null.
+  InstanceKlass* native_collection_representation() const;
+  // UseSwissTable: the class whose mirror Object.getClass() reports for an object of
+  // class k (the base class for a native representation, else k itself).
+  static Klass* native_collection_reported_class(Klass* k);
+  // True for java.util.SwissTable, which is laid out without the instance fields of its
+  // superclasses (see ClassFileParser): lookups of instance fields through it stop at it.
+  bool has_independent_layout() const;
   static instanceOop allocate_instance(oop cls, TRAPS);
 
   // additional member function to return a handle

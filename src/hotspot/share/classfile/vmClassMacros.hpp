@@ -152,6 +152,10 @@
   do_klass(CodeSource_klass,                            java_security_CodeSource                              ) \
   do_klass(ConcurrentHashMap_klass,                     java_util_concurrent_ConcurrentHashMap                ) \
   do_klass(ArrayList_klass,                             java_util_ArrayList                                   ) \
+  /* native collections (UseSwissTable) */                                                                      \
+  do_klass(HashMap_klass,                               java_util_HashMap                                     ) \
+  do_klass(SwissTable_klass,                            java_util_SwissTable                                  ) \
+  do_klass(SwissTableBuffer_klass,                      java_util_SwissTableBuffer                            ) \
                                                                                                                 \
   do_klass(StackTraceElement_klass,                     java_lang_StackTraceElement                           ) \
                                                                                                                 \

@@ -2240,7 +2240,21 @@ void GraphBuilder::new_instance(int klass_index) {
   ValueStack* state_before = copy_state_exhandling();
   ciKlass* klass = stream()->get_klass();
   assert(klass->is_instance_klass(), "must be an instance klass");
-  NewInstance* new_instance = new NewInstance(klass->as_instance_klass(), state_before, stream()->is_unresolved_klass());
+  bool is_unresolved = stream()->is_unresolved_klass();
+  if (UseSwissTable) {
+    // An allocation of exactly HashMap always produces the native representation, and
+    // the NewInstance's exact type is what C1 binds calls on the new object to (the inlined
+    // constructor's init() among them), so allocate the native class here in every case: when the
+    // constant pool entry is still unresolved (its name can only denote the boot class, so no
+    // resolution is needed) and when the native class is not initialized yet (the allocation then
+    // takes the initialization-checking path).
+    ciInstanceKlass* native = ciEnv::current()->native_collection_representation(klass);
+    if (native != nullptr && native->is_loaded()) {
+      klass = native;
+      is_unresolved = false;
+    }
+  }
+  NewInstance* new_instance = new NewInstance(klass->as_instance_klass(), state_before, is_unresolved);
   _memory->new_instance(new_instance);
   apush(append_split(new_instance));
 }

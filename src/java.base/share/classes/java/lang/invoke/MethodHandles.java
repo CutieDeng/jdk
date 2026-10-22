@@ -4159,9 +4159,24 @@ return mh1;
             DirectMethodHandle dmh = DirectMethodHandle.make(refc, field);
             boolean doRestrict = (MethodHandleNatives.refKindHasReceiver(refKind) &&
                                     restrictProtectedReceiver(field));
-            if (doRestrict)
-                return restrictReceiver(field, dmh, lookupClass());
-            return dmh;
+            MethodHandle mh = doRestrict ? restrictReceiver(field, dmh, lookupClass()) : dmh;
+            if (jdk.internal.util.NativeCollections.isGuardedField(field.getDeclaringClass(), field.isStatic()))
+                mh = filterArguments(mh, 0, nativeCollectionsReceiverCheck(mh.type().parameterType(0)));
+            return mh;
+        }
+
+        /**
+         * (T)T: returns its argument, or throws IllegalArgumentException for a native HashMap, which
+         * has none of the instance fields of HashMap and AbstractMap (-XX:+UseSwissTable).
+         */
+        private static MethodHandle nativeCollectionsReceiverCheck(Class<?> receiverType) {
+            try {
+                return IMPL_LOOKUP.findStatic(jdk.internal.util.NativeCollections.class, "checkReceiver",
+                                              MethodType.methodType(Object.class, Object.class))
+                        .asType(MethodType.methodType(receiverType, receiverType));
+            } catch (ReflectiveOperationException e) {
+                throw new InternalError(e);
+            }
         }
         private VarHandle getFieldVarHandle(byte getRefKind, byte putRefKind,
                                             Class<?> refc, MemberName getField, MemberName putField)
@@ -4207,8 +4222,11 @@ return mh1;
                 }
                 refc = lookupClass();
             }
-            return VarHandles.makeFieldHandle(getField, refc, getField.getFieldType(),
-                                              this.allowedModes == TRUSTED && !getField.isTrustedFinalField());
+            VarHandle vh = VarHandles.makeFieldHandle(getField, refc, getField.getFieldType(),
+                                                      this.allowedModes == TRUSTED && !getField.isTrustedFinalField());
+            if (jdk.internal.util.NativeCollections.isGuardedField(getField.getDeclaringClass(), getField.isStatic()))
+                vh = VarHandles.filterCoordinates(vh, 0, nativeCollectionsReceiverCheck(refc));
+            return vh;
         }
         /** Check access and get the requested constructor. */
         private MethodHandle getDirectConstructor(Class<?> refc, MemberName ctor) throws IllegalAccessException {

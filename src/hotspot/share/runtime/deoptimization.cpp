@@ -1479,7 +1479,8 @@ static int reassign_fields_by_klass(InstanceKlass* klass, frame* fr, RegisterMap
         fields->append(field);
       }
     }
-    ik = ik->superklass();
+    // a class laid out without its superclasses' instance fields (java.util.SwissTable) has none of them
+    ik = ik->has_independent_layout() ? nullptr : ik->superklass();
   }
   fields->sort(compare);
   for (int i = 0; i < fields->length(); i++) {

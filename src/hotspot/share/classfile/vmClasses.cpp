@@ -37,8 +37,10 @@
 #include "oops/instanceKlass.hpp"
 #include "oops/instanceRefKlass.hpp"
 #include "oops/instanceStackChunkKlass.hpp"
+#include "oops/instanceSwissTableBufferKlass.hpp"
 #include "prims/jvmtiExport.hpp"
 #include "runtime/globals.hpp"
+#include "runtime/globals_extension.hpp"
 
 InstanceKlass* vmClasses::_klasses[static_cast<int>(vmClassID::LIMIT)]
                                                  =  { nullptr /*, nullptr...*/ };
@@ -196,6 +198,21 @@ void vmClasses::resolve_all(TRAPS) {
 
   CollectedHeap::set_filler_object_klass(vmClasses::FillerObject_klass());
 
+  // UseSwissTable: allocations of exactly HashMap produce its native representation,
+  // SwissTable. Mark the base class slow-path so every fast allocation path that did not
+  // substitute the class itself (interpreter template, compiled code that fell back) reaches
+  // InstanceKlass::allocate_instance, which redirects. Done here rather than in the class file
+  // parser so that classes restored from the CDS archive are covered as well.
+  if (UseSwissTable && DumpSharedSpaces) {
+    // A static archive stores this JVM's class layouts and heap objects: keep both stock.
+    warning("-XX:+UseSwissTable is ignored when dumping a static CDS archive");
+    FLAG_SET_ERGO(UseSwissTable, false);
+  }
+  if (UseSwissTable) {
+    InstanceKlass* base = vmClasses::HashMap_klass();
+    base->set_layout_helper(Klass::instance_layout_helper(base->size_helper(), true));
+  }
+
   _box_klasses[T_BOOLEAN] = vmClasses::Boolean_klass();
   _box_klasses[T_CHAR]    = vmClasses::Character_klass();
   _box_klasses[T_FLOAT]   = vmClasses::Float_klass();
@@ -219,6 +236,7 @@ void vmClasses::resolve_all(TRAPS) {
 #endif
 
   InstanceStackChunkKlass::init_offset_of_stack();
+  InstanceSwissTableBufferKlass::init_offsets();
 }
 
 #if INCLUDE_CDS

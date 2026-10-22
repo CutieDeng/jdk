@@ -67,7 +67,10 @@ bool C2Access::needs_cpu_membar() const {
     // the barriers get omitted and the unsafe reference begins to "pollute"
     // the alias analysis of the rest of the graph, either Compile::can_alias
     // or Compile::must_alias will throw a diagnostic assert.)
-    if (is_mixed || !is_unordered || (mismatched && !_addr.type()->isa_aryptr())) {
+    // Like the elements of an array, the trailing data of a java.util.SwissTableBuffer has a unique
+    // alias category, which accesses of different sizes share.
+    if (is_mixed || !is_unordered ||
+        (mismatched && !_addr.type()->isa_aryptr() && !Compile::current()->is_swiss_table_buffer_data(_addr.type()))) {
       return true;
     }
   } else {

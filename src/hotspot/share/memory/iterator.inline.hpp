@@ -37,6 +37,7 @@
 #include "oops/instanceClassLoaderKlass.inline.hpp"
 #include "oops/instanceRefKlass.inline.hpp"
 #include "oops/instanceStackChunkKlass.inline.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/objArrayKlass.inline.hpp"
 #include "oops/typeArrayKlass.inline.hpp"
 #include "utilities/debug.hpp"
@@ -147,6 +148,7 @@ private:
       set_init_function<InstanceMirrorKlass>();
       set_init_function<InstanceClassLoaderKlass>();
       set_init_function<InstanceStackChunkKlass>();
+      set_init_function<InstanceSwissTableBufferKlass>();
       set_init_function<ObjArrayKlass>();
       set_init_function<TypeArrayKlass>();
     }
@@ -210,6 +212,7 @@ private:
       set_init_function<InstanceMirrorKlass>();
       set_init_function<InstanceClassLoaderKlass>();
       set_init_function<InstanceStackChunkKlass>();
+      set_init_function<InstanceSwissTableBufferKlass>();
       set_init_function<ObjArrayKlass>();
       set_init_function<TypeArrayKlass>();
     }
@@ -273,6 +276,7 @@ private:
       set_init_function<InstanceMirrorKlass>();
       set_init_function<InstanceClassLoaderKlass>();
       set_init_function<InstanceStackChunkKlass>();
+      set_init_function<InstanceSwissTableBufferKlass>();
       set_init_function<ObjArrayKlass>();
       set_init_function<TypeArrayKlass>();
     }

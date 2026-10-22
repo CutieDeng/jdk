@@ -480,6 +480,14 @@ bool ciEnv::check_klass_accessibility(ciKlass* accessing_klass,
 }
 
 // ------------------------------------------------------------------
+// ciEnv::native_collection_representation
+ciInstanceKlass* ciEnv::native_collection_representation(ciKlass* k) {
+  if (k == nullptr) return nullptr;
+  if (k->name() == ciSymbols::java_util_HashMap())   return SwissTable_klass();
+  return nullptr;
+}
+
+// ------------------------------------------------------------------
 // ciEnv::get_klass_by_name_impl
 ciKlass* ciEnv::get_klass_by_name_impl(ciKlass* accessing_klass,
                                        const constantPoolHandle& cpool,

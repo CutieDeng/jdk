@@ -39,6 +39,7 @@
 #include "memory/universe.hpp"
 #include "oops/fieldStreams.inline.hpp"
 #include "oops/klass.inline.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "oops/objArrayOop.inline.hpp"
 #include "oops/oop.inline.hpp"
@@ -928,6 +929,8 @@ class DumperSupport : AllStatic {
 
   // creates HPROF_GC_OBJ_ARRAY_DUMP record for the given object array
   static void dump_object_array(AbstractDumpWriter* writer, objArrayOop array);
+  // creates a HPROF_GC_OBJ_ARRAY_DUMP record for a swiss table (java.util.SwissTableBuffer)
+  static void dump_swiss_table_buffer(AbstractDumpWriter* writer, oop o);
   // creates HPROF_GC_PRIM_ARRAY_DUMP record for the given type array
   static void dump_prim_array(AbstractDumpWriter* writer, typeArrayOop array);
   // create HPROF_FRAME record for the given method and bci
@@ -1383,8 +1386,9 @@ void DumperSupport::dump_instance_class(AbstractDumpWriter* writer, Klass* k) {
   writer->write_classID(ik);
   writer->write_u4(STACK_TRACE_ID);
 
-  // super class ID
-  InstanceKlass* java_super = ik->java_super();
+  // super class ID; a class laid out without its superclasses' instance fields is described as a
+  // direct subclass of Object, so that readers parse only its own fields in its instances
+  InstanceKlass* java_super = ik->has_independent_layout() ? vmClasses::Object_klass() : ik->java_super();
   if (java_super == nullptr) {
     writer->write_objectID(oop(nullptr));
   } else {
@@ -1502,6 +1506,35 @@ void DumperSupport::dump_object_array(AbstractDumpWriter* writer, objArrayOop ar
     writer->write_objectID(o);
   }
 
+  writer->end_sub_record();
+}
+
+// A swiss table (java.util.SwissTableBuffer, the storage of a native HashMap) holds its key/value
+// references after its fields; it is dumped as an Object[] of its aux reference followed by the
+// key/value references, so that heap analyzers follow the references from a map to its contents.
+void DumperSupport::dump_swiss_table_buffer(AbstractDumpWriter* writer, oop o) {
+  InstanceSwissTableBufferKlass* k = InstanceSwissTableBufferKlass::cast(o->klass());
+  const jint cap = InstanceSwissTableBufferKlass::capacity(o);
+  const int refs_base = k->ctrl_base_in_bytes() + cap;
+  // sizeof(u1) + 2 * sizeof(u4) + sizeof(objectID) + sizeof(classID)
+  short header_size = 1 + 2 * 4 + 2 * sizeof(address);
+  int length = 1 + 2 * cap;
+  const int max_length = (int) MIN2((size_t) max_jint, (size_t) (max_juint - header_size) / sizeof(address));
+  if (length > max_length) {
+    warning("cannot dump swiss table with %d references; truncating to %d", length, max_length);
+    length = max_length;
+  }
+  u4 size = header_size + length * sizeof(address);
+
+  writer->start_sub_record(HPROF_GC_OBJ_ARRAY_DUMP, size);
+  writer->write_objectID(o);
+  writer->write_u4(STACK_TRACE_ID);
+  writer->write_u4(length);
+  writer->write_classID(Universe::objectArrayKlassObj());
+  writer->write_objectID(o->obj_field_access<AS_NO_KEEPALIVE | ON_UNKNOWN_OOP_REF>(InstanceSwissTableBufferKlass::aux_offset()));
+  for (int index = 0; index < length - 1; index++) {
+    writer->write_objectID(o->obj_field_access<AS_NO_KEEPALIVE | ON_UNKNOWN_OOP_REF>(refs_base + index * heapOopSize));
+  }
   writer->end_sub_record();
 }
 
@@ -1844,7 +1877,10 @@ void HeapObjectDumper::do_object(oop o) {
     return;
   }
 
-  if (o->is_instance()) {
+  if (o->klass()->is_swiss_table_buffer_instance_klass()) {
+    // the storage of a native HashMap, dumped as an Object[] of its references
+    DumperSupport::dump_swiss_table_buffer(writer(), o);
+  } else if (o->is_instance()) {
     // create a HPROF_GC_INSTANCE record for each object
     DumperSupport::dump_instance(writer(), o, &_class_cache);
   } else if (o->is_objArray()) {

@@ -1295,6 +1295,19 @@ bool Compile::allow_range_check_smearing() const {
 
 
 //------------------------------flatten_alias_type-----------------------------
+bool Compile::is_swiss_table_buffer_data(const TypePtr* adr_type) const {
+  const TypeInstPtr* tinst = adr_type->isa_instptr();
+  if (tinst == nullptr || !tinst->is_loaded()) {
+    return false;
+  }
+  ciInstanceKlass* swiss = env()->SwissTableBuffer_klass();
+  if (swiss == nullptr || tinst->instance_klass() != swiss) {
+    return false;
+  }
+  const int offset = tinst->offset();
+  return offset == Type::OffsetBot || offset >= swiss->layout_helper_size_in_bytes();
+}
+
 const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
   assert(do_aliasing(), "Aliasing should be enabled");
   int offset = tj->offset();
@@ -1305,7 +1318,8 @@ const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
                        tj->is_oopptr()->is_known_instance();
 
   // Process weird unsafe references.
-  if (offset == Type::OffsetBot && (tj->isa_instptr() /*|| tj->isa_klassptr()*/)) {
+  // (The trailing data of a java.util.SwissTableBuffer has an alias class of its own; see below.)
+  if (offset == Type::OffsetBot && (tj->isa_instptr() /*|| tj->isa_klassptr()*/) && !is_swiss_table_buffer_data(tj)) {
     assert(InlineUnsafeOps || StressReflectiveCode, "indeterminate pointers come only from unsafe ops");
     assert(!is_known_inst, "scalarizable allocation should not have unsafe references");
     tj = TypeOopPtr::BOTTOM;
@@ -1438,7 +1452,11 @@ const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
     } else if (offset < 0 || offset >= ik->layout_helper_size_in_bytes()) {
       // Static fields are in the space above the normal instance
       // fields in the java.lang.Class instance.
-      if (ik != ciEnv::current()->Class_klass()) {
+      if (ik == env()->SwissTableBuffer_klass()) {
+        // The trailing data of a java.util.SwissTableBuffer: one alias class (see is_swiss_table_buffer_data)
+        tj = to = TypeInstPtr::make(to->ptr(), ik, true, nullptr, Type::OffsetBot, to->instance_id());
+        offset = Type::OffsetBot;
+      } else if (ik != ciEnv::current()->Class_klass()) {
         to = nullptr;
         tj = TypeOopPtr::BOTTOM;
         offset = tj->offset();
@@ -1515,6 +1533,7 @@ const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
           (offset == Type::OffsetBot && tj->base() == Type::AryPtr) ||
           (offset == Type::OffsetBot && tj == TypeOopPtr::BOTTOM) ||
           (offset == Type::OffsetBot && tj == TypePtr::BOTTOM) ||
+          (offset == Type::OffsetBot && is_swiss_table_buffer_data(tj)) ||
           (offset == oopDesc::mark_offset_in_bytes() && tj->base() == Type::AryPtr) ||
           (offset == oopDesc::klass_offset_in_bytes() && tj->base() == Type::AryPtr) ||
           (offset == arrayOopDesc::length_offset_in_bytes() && tj->base() == Type::AryPtr),

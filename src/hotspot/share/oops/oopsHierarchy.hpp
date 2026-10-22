@@ -194,6 +194,7 @@ class     InstanceMirrorKlass;
 class     InstanceClassLoaderKlass;
 class     InstanceRefKlass;
 class     InstanceStackChunkKlass;
+class     InstanceSwissTableBufferKlass;
 class   ArrayKlass;
 class     ObjArrayKlass;
 class     TypeArrayKlass;

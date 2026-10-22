@@ -227,6 +227,8 @@ class LibraryCallKit : public GraphKit {
   bool inline_unsafe_access(bool is_store, BasicType type, AccessKind kind, bool is_unaligned);
   static bool klass_needs_init_guard(Node* kls);
   bool inline_unsafe_allocate();
+  bool inline_swiss_table_buffer_allocate();
+  bool inline_swiss_match_tag(bool first_lane);
   bool inline_unsafe_newArray(bool uninitialized);
   bool inline_unsafe_writeback0();
   bool inline_unsafe_writebackSync0(bool is_pre);
@@ -265,6 +267,7 @@ class LibraryCallKit : public GraphKit {
   // Helper function for inlining native object hash method
   bool inline_native_hashcode(bool is_virtual, bool is_static);
   bool inline_native_getClass();
+  Node* native_collection_reported_klass(Node* kls);
 
   // Helper functions for inlining arraycopy
   bool inline_arraycopy();

@@ -121,6 +121,7 @@ class OptoRuntime : public AllStatic {
   // References to generated stubs
   static address _new_instance_Java;
   static address _new_array_Java;
+  static address _new_swiss_table_buffer_Java;
   static address _new_array_nozero_Java;
   static address _multianewarray2_Java;
   static address _multianewarray3_Java;
@@ -151,6 +152,7 @@ class OptoRuntime : public AllStatic {
 
   // Allocate storage for a objArray or typeArray
   static void new_array_C(Klass* array_klass, int len, JavaThread* current);
+  static void new_swiss_table_buffer_C(Klass* klass, int capacity, JavaThread* current);
   static void new_array_nozero_C(Klass* array_klass, int len, JavaThread* current);
 
   // Allocate storage for a multi-dimensional arrays
@@ -201,6 +203,7 @@ private:
   // access to runtime stubs entry points for java code
   static address new_instance_Java()                     { return _new_instance_Java; }
   static address new_array_Java()                        { return _new_array_Java; }
+  static address new_swiss_table_buffer_Java()                  { return _new_swiss_table_buffer_Java; }
   static address new_array_nozero_Java()                 { return _new_array_nozero_Java; }
   static address multianewarray2_Java()                  { return _multianewarray2_Java; }
   static address multianewarray3_Java()                  { return _multianewarray3_Java; }

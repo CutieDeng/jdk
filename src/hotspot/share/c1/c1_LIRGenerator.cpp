@@ -1277,8 +1277,29 @@ void LIRGenerator::do_getClass(Intrinsic* x) {
   load_klass(rcvr.result(), klass, info);
   __ move_wide(new LIR_Address(klass, in_bytes(Klass::java_mirror_offset()), T_ADDRESS), temp);
   // mirror = ((OopHandle)mirror)->resolve();
+  if (!UseSwissTable) {
+    access_load(IN_NATIVE, T_OBJECT,
+                LIR_OprFact::address(new LIR_Address(temp, T_OBJECT)), result);
+    return;
+  }
+  // UseSwissTable: SwissTable reports its base class. Replace the
+  // native class's mirror by the base class's with oop compares against constant mirrors and
+  // conditional moves, the code C1 emits for a conditional expression over objects.
+  LIR_Opr mirror = new_register(T_OBJECT);
   access_load(IN_NATIVE, T_OBJECT,
-              LIR_OprFact::address(new LIR_Address(temp, T_OBJECT)), result);
+              LIR_OprFact::address(new LIR_Address(temp, T_OBJECT)), mirror);
+  ciEnv* env = ciEnv::current();
+  ciInstanceKlass* pairs[][2] = {
+    { env->SwissTable_klass(),  env->HashMap_klass()   },
+  };
+  const int n = (int) (sizeof(pairs) / sizeof(pairs[0]));
+  for (int i = 0; i < n; i++) {
+    LIR_Opr selected = (i == n - 1) ? result : new_register(T_OBJECT);
+    __ cmp(lir_cond_equal, mirror, LIR_OprFact::oopConst(pairs[i][0]->java_mirror()->constant_encoding()));
+    __ cmove(lir_cond_equal, LIR_OprFact::oopConst(pairs[i][1]->java_mirror()->constant_encoding()),
+             mirror, selected, T_OBJECT);
+    mirror = selected;
+  }
 }
 
 // java.lang.Class::isPrimitive()

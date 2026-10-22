@@ -425,7 +425,7 @@ public class HashMap<K,V> extends AbstractMap<K,V>
      *
      * @serial
      */
-    final float loadFactor;
+    float loadFactor;
 
     /* ---------------- Public operations -------------- */
 
@@ -451,8 +451,7 @@ public class HashMap<K,V> extends AbstractMap<K,V>
         if (loadFactor <= 0 || Float.isNaN(loadFactor))
             throw new IllegalArgumentException("Illegal load factor: " +
                                                loadFactor);
-        this.loadFactor = loadFactor;
-        this.threshold = tableSizeFor(initialCapacity);
+        init(initialCapacity, loadFactor);
     }
 
     /**
@@ -475,7 +474,7 @@ public class HashMap<K,V> extends AbstractMap<K,V>
      * (16) and the default load factor (0.75).
      */
     public HashMap() {
-        this.loadFactor = DEFAULT_LOAD_FACTOR; // all other fields defaulted
+        init(LAZY_CAPACITY, DEFAULT_LOAD_FACTOR);
     }
 
     /**
@@ -488,8 +487,21 @@ public class HashMap<K,V> extends AbstractMap<K,V>
      * @throws  NullPointerException if the specified map is null
      */
     public HashMap(Map<? extends K, ? extends V> m) {
-        this.loadFactor = DEFAULT_LOAD_FACTOR;
+        init(LAZY_CAPACITY, DEFAULT_LOAD_FACTOR);
         putMapEntries(m, false);
+    }
+
+    /** Passed to {@link #init} by the constructors that leave the table to be sized lazily. */
+    static final int LAZY_CAPACITY = -1;
+
+    /**
+     * Constructor body hook: every constructor ends here instead of writing fields directly, so a
+     * subclass with its own representation (SwissTable) never has HashMap's fields written.
+     * {@code initialCapacity} is validated by the caller; {@link #LAZY_CAPACITY} means "size later".
+     */
+    void init(int initialCapacity, float loadFactor) {
+        this.loadFactor = loadFactor;
+        this.threshold = initialCapacity == LAZY_CAPACITY ? 0 : tableSizeFor(initialCapacity);
     }
 
     /**
@@ -499,7 +511,7 @@ public class HashMap<K,V> extends AbstractMap<K,V>
      * @param evict false when initially constructing this map, else
      * true (relayed to method afterNodeInsertion).
      */
-    final void putMapEntries(Map<? extends K, ? extends V> m, boolean evict) {
+    void putMapEntries(Map<? extends K, ? extends V> m, boolean evict) {
         int s = m.size();
         if (s > 0) {
             if (table == null) { // pre-size
@@ -927,7 +939,7 @@ public class HashMap<K,V> extends AbstractMap<K,V>
      * @return an array ready to be filled and returned from {@code toArray()} method.
      */
     @SuppressWarnings("unchecked")
-    final <T> T[] prepareArray(T[] a) {
+    <T> T[] prepareArray(T[] a) {
         int size = this.size;
         if (a.length < size) {
             return (T[]) java.lang.reflect.Array
@@ -1475,8 +1487,8 @@ public class HashMap<K,V> extends AbstractMap<K,V>
     }
 
     // These methods are also used when serializing HashSets
-    final float loadFactor() { return loadFactor; }
-    final int capacity() {
+    float loadFactor() { return loadFactor; }
+    int capacity() {
         return (table != null) ? table.length :
             (threshold > 0) ? threshold :
             DEFAULT_INITIAL_CAPACITY;
@@ -1498,12 +1510,19 @@ public class HashMap<K,V> extends AbstractMap<K,V>
     private void writeObject(java.io.ObjectOutputStream s)
         throws IOException {
         int buckets = capacity();
-        // Write out the threshold, loadfactor, and any hidden stuff
-        s.defaultWriteObject();
+        // Write out the threshold and loadfactor by name: the values come from accessors so a
+        // subclass with another representation serializes the same form.
+        java.io.ObjectOutputStream.PutField pf = s.putFields();
+        pf.put("threshold", thresholdForSerialization());
+        pf.put("loadFactor", loadFactor());
+        s.writeFields();
         s.writeInt(buckets);
-        s.writeInt(size);
+        s.writeInt(size());
         internalWriteEntries(s);
     }
+
+    /** The {@code threshold} serial field. */
+    int thresholdForSerialization() { return threshold; }
 
     /**
      * Reconstitutes this map from a stream (that is, deserializes it).
@@ -1524,55 +1543,57 @@ public class HashMap<K,V> extends AbstractMap<K,V>
             throw new InvalidObjectException("Illegal load factor: " + lf);
 
         lf = Math.clamp(lf, 0.25f, 4.0f);
-        HashMap.UnsafeHolder.putLoadFactor(this, lf);
 
         reinitialize();
 
         s.readInt();                // Read and ignore number of buckets
         int mappings = s.readInt(); // Read number of mappings (size)
-        if (mappings < 0) {
+        if (mappings < 0)
             throw new InvalidObjectException("Illegal mappings count: " + mappings);
-        } else if (mappings == 0) {
-            // use defaults
-        } else if (mappings > 0) {
+        int cap = 0;
+        if (mappings > 0) {
             double dc = Math.ceil(mappings / (double)lf);
-            int cap = ((dc < DEFAULT_INITIAL_CAPACITY) ?
-                       DEFAULT_INITIAL_CAPACITY :
-                       (dc >= MAXIMUM_CAPACITY) ?
-                       MAXIMUM_CAPACITY :
-                       tableSizeFor((int)dc));
-            float ft = (float)cap * lf;
-            threshold = ((cap < MAXIMUM_CAPACITY && ft < MAXIMUM_CAPACITY) ?
-                         (int)ft : Integer.MAX_VALUE);
+            cap = ((dc < DEFAULT_INITIAL_CAPACITY) ?
+                   DEFAULT_INITIAL_CAPACITY :
+                   (dc >= MAXIMUM_CAPACITY) ?
+                   MAXIMUM_CAPACITY :
+                   tableSizeFor((int)dc));
+        }
+        initForDeserialization(s, cap, mappings, lf);
 
-            // Check Map.Entry[].class since it's the nearest public type to
-            // what we're actually creating.
-            SharedSecrets.getJavaObjectInputStreamAccess().checkArray(s, Map.Entry[].class, cap);
-            @SuppressWarnings({"rawtypes","unchecked"})
-            Node<K,V>[] tab = (Node<K,V>[])new Node[cap];
-            table = tab;
-
-            // Read the keys and values, and put the mappings in the HashMap
-            for (int i = 0; i < mappings; i++) {
-                @SuppressWarnings("unchecked")
-                    K key = (K) s.readObject();
-                @SuppressWarnings("unchecked")
-                    V value = (V) s.readObject();
-                putVal(hash(key), key, value, false, false);
-            }
+        // Read the keys and values, and put the mappings in the HashMap
+        for (int i = 0; i < mappings; i++) {
+            @SuppressWarnings("unchecked")
+                K key = (K) s.readObject();
+            @SuppressWarnings("unchecked")
+                V value = (V) s.readObject();
+            putForDeserialization(key, value);
         }
     }
 
-    // Support for resetting final field during deserializing
-    private static final class UnsafeHolder {
-        private UnsafeHolder() { throw new InternalError(); }
-        private static final jdk.internal.misc.Unsafe unsafe
-                = jdk.internal.misc.Unsafe.getUnsafe();
-        private static final long LF_OFFSET
-                = unsafe.objectFieldOffset(HashMap.class, "loadFactor");
-        static void putLoadFactor(HashMap<?, ?> map, float lf) {
-            unsafe.putFloat(map, LF_OFFSET, lf);
+    /**
+     * Deserialization hook: adopt the load factor and allocate storage for {@code mappings}
+     * mappings; {@code capacity} is the bucket count this class uses for that ({@code 0}: none).
+     * Representation-specific; overridden by SwissTable.
+     */
+    void initForDeserialization(ObjectInputStream s, int capacity, int mappings, float lf) throws IOException {
+        loadFactor = lf;
+        if (capacity > 0) {
+            float ft = (float)capacity * lf;
+            threshold = ((capacity < MAXIMUM_CAPACITY && ft < MAXIMUM_CAPACITY) ?
+                         (int)ft : Integer.MAX_VALUE);
+            // Check Map.Entry[].class since it's the nearest public type to
+            // what we're actually creating.
+            SharedSecrets.getJavaObjectInputStreamAccess().checkArray(s, Map.Entry[].class, capacity);
+            @SuppressWarnings({"rawtypes","unchecked"})
+            Node<K,V>[] tab = (Node<K,V>[])new Node[capacity];
+            table = tab;
         }
+    }
+
+    /** Deserialization hook: store one mapping read from the stream. */
+    void putForDeserialization(K key, V value) {
+        putVal(hash(key), key, value, false, false);
     }
 
     /* ------------------------------------------------------------ */

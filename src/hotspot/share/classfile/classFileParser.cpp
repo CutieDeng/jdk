@@ -5961,7 +5961,13 @@ void ClassFileParser::post_process_parsed_stream(const ClassFileStream* const st
   assert(_parsed_annotations != nullptr, "invariant");
 
   _field_info = new FieldLayoutInfo();
-  FieldLayoutBuilder lb(class_name(), super_klass(), _cp, /*_fields*/ _temp_field_info,
+  // java.util.SwissTable, the native representation of HashMap (UseSwissTable), does not
+  // embed the instance fields of its superclasses HashMap and AbstractMap: its instances hold only
+  // their own fields. Its type stays a subclass of HashMap; the bytecode it runs never names an
+  // inherited field, and field access through reflection, JNI and method handles is guarded.
+  const bool independent_layout = class_name() == vmSymbols::java_util_SwissTable() &&
+                                  _loader_data->is_the_null_class_loader_data();
+  FieldLayoutBuilder lb(class_name(), independent_layout ? nullptr : super_klass(), _cp, /*_fields*/ _temp_field_info,
                         _parsed_annotations->is_contended(), _field_info);
   lb.build_layout();
 

@@ -228,7 +228,9 @@ ciInstanceKlass* ciInstanceKlass::get_canonical_holder(int offset) {
     for (;;) {
       assert(self->is_loaded(), "must be loaded to have size");
       ciInstanceKlass* super = self->super();
-      if (super == nullptr ||
+      bool independent_layout;
+      GUARDED_VM_ENTRY(independent_layout = self->get_instanceKlass()->has_independent_layout();)
+      if (super == nullptr || independent_layout ||
           super->nof_nonstatic_fields() == 0 ||
           super->layout_helper_size_in_bytes() <= offset) {
         return self;
@@ -472,7 +474,9 @@ int ciInstanceKlass::compute_nonstatic_fields() {
 
   ciInstanceKlass* super = this->super();
   GrowableArray<ciField*>* super_fields = nullptr;
-  if (super != nullptr && super->has_nonstatic_fields()) {
+  bool independent_layout;
+  GUARDED_VM_ENTRY(independent_layout = get_instanceKlass()->has_independent_layout();)
+  if (super != nullptr && super->has_nonstatic_fields() && !independent_layout) {
     int super_flen   = super->nof_nonstatic_fields();
     super_fields = super->_nonstatic_fields;
     assert(super_flen == 0 || super_fields != nullptr, "first get nof_fields");

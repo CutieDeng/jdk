@@ -38,6 +38,7 @@
 #include "oops/arrayOop.hpp"
 #include "oops/constantPool.inline.hpp"
 #include "oops/instanceMirrorKlass.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/klass.inline.hpp"
 #include "oops/objArrayKlass.hpp"
 #include "oops/objArrayOop.inline.hpp"
@@ -462,12 +463,14 @@ ClassFieldMap* ClassFieldMap::create_map_of_instance_fields(oop obj) {
   // create the field map
   ClassFieldMap* field_map = new ClassFieldMap();
 
-  FilteredFieldStream f(ik, false, false);
+  // A class laid out without its superclasses' instance fields holds only its own.
+  const bool local_only = ik->has_independent_layout();
+  FilteredFieldStream f(ik, local_only, false);
 
   int max_field_index = f.field_count()-1;
 
   int index = 0;
-  for (FilteredFieldStream fld(ik, false, false); !fld.eos(); fld.next(), index++) {
+  for (FilteredFieldStream fld(ik, local_only, false); !fld.eos(); fld.next(), index++) {
     // ignore static fields
     if (fld.access_flags().is_static()) {
       continue;
@@ -2719,6 +2722,20 @@ inline bool VM_HeapWalkOperation::iterate_over_object(oop o) {
         if (!CallbackInvoker::report_primitive_instance_field(o, slot, addr, type)) {
           return false;
         }
+      }
+    }
+  }
+
+  // the trailing key/value references of a swiss table (java.util.SwissTableBuffer, the storage of a
+  // native HashMap) are not fields: report them like the elements of an object array
+  if (o->klass()->is_swiss_table_buffer_instance_klass()) {
+    InstanceSwissTableBufferKlass* k = InstanceSwissTableBufferKlass::cast(o->klass());
+    const jint cap = InstanceSwissTableBufferKlass::capacity(o);
+    const int refs_base = k->ctrl_base_in_bytes() + cap;
+    for (int index = 0; index < 2 * cap; index++) {
+      oop elem = o->obj_field_access<AS_NO_KEEPALIVE | ON_UNKNOWN_OOP_REF>(refs_base + index * heapOopSize);
+      if (elem != nullptr && !CallbackInvoker::report_array_element_reference(o, elem, index)) {
+        return false;
       }
     }
   }

@@ -1107,6 +1107,29 @@ class VectorMaskToLongNode : public VectorMaskOpNode {
   virtual Node* Identity(PhaseGVN* phase);
 };
 
+// UseSwissTable: the group match of java.util.SwissTable. in(1) holds the 8 control
+// bytes of a group, in(2) the tag in every byte; the result has bit 8j + 7 set exactly for the
+// lanes j where they are equal, the format of SwissTable.matchTag. See
+// LibraryCallKit::inline_swiss_match_tag.
+class SwissGroupMatchNode : public Node {
+ public:
+  SwissGroupMatchNode(Node* ctrl, Node* tag) : Node(nullptr, ctrl, tag) {}
+  virtual int Opcode() const;
+  virtual const Type* bottom_type() const { return TypeLong::LONG; }
+  virtual uint ideal_reg() const { return Op_RegL; }
+};
+
+// The raw group match, for SwissTable.firstTagLaneAt: every bit of a lane j where the bytes are
+// equal is set, so the number of trailing zeros is 8j for the lowest such lane, or 64 when there
+// is none. SwissGroupMatchNode is this value with only bit 7 of each lane kept.
+class SwissGroupMatchRawNode : public Node {
+ public:
+  SwissGroupMatchRawNode(Node* ctrl, Node* tag) : Node(nullptr, ctrl, tag) {}
+  virtual int Opcode() const;
+  virtual const Type* bottom_type() const { return TypeLong::LONG; }
+  virtual uint ideal_reg() const { return Op_RegL; }
+};
+
 class VectorLongToMaskNode : public VectorNode {
  public:
   VectorLongToMaskNode(Node* mask, const TypeVect* ty):

@@ -685,6 +685,15 @@ bool C2Compiler::is_intrinsic_supported(const methodHandle& method) {
   case vmIntrinsics::_currentTimeMillis:
   case vmIntrinsics::_nanoTime:
   case vmIntrinsics::_allocateInstance:
+  case vmIntrinsics::_swissTableBufferAllocate:
+    break;
+  case vmIntrinsics::_swissMatchTag:
+    if (!Matcher::match_rule_supported(Op_SwissGroupMatch)) return false;
+    break;
+  case vmIntrinsics::_swissFirstTagLane:
+    if (!Matcher::match_rule_supported(Op_SwissGroupMatchRaw) ||
+        !Matcher::match_rule_supported(Op_CountTrailingZerosL)) return false;
+    break;
   case vmIntrinsics::_allocateUninitializedArray:
   case vmIntrinsics::_newArray:
   case vmIntrinsics::_getLength:

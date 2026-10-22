@@ -174,6 +174,12 @@ const int ObjectAlignmentInBytes = 8;
   product(bool, AlwaysSafeConstructors, false, EXPERIMENTAL,                \
           "Force safe construction, as if all fields are final.")           \
                                                                             \
+  product(bool, UseSwissTable, false,                                       \
+          "Allocate instances of exactly java.util.HashMap as "             \
+          "java.util.SwissTable, a swiss table (open addressing over "      \
+          "control bytes, SIMD group probing); getClass() still "           \
+          "reports HashMap")                                                \
+                                                                            \
   product(bool, UnlockDiagnosticVMOptions, trueInDebug, DIAGNOSTIC,         \
           "Enable normal processing of flags relating to field diagnostics")\
                                                                             \

@@ -64,6 +64,7 @@
 #include "oops/instanceMirrorKlass.hpp"
 #include "oops/instanceOop.hpp"
 #include "oops/instanceStackChunkKlass.hpp"
+#include "oops/instanceSwissTableBufferKlass.hpp"
 #include "oops/klass.inline.hpp"
 #include "oops/method.hpp"
 #include "oops/oop.inline.hpp"
@@ -168,6 +169,12 @@ static inline bool is_class_loader(const Symbol* class_name,
 static inline bool is_stack_chunk_class(const Symbol* class_name,
                                         const ClassLoaderData* loader_data) {
   return (class_name == vmSymbols::jdk_internal_vm_StackChunk() &&
+          loader_data->is_the_null_class_loader_data());
+}
+
+static inline bool is_swiss_table_buffer_class(const Symbol* class_name,
+                                        const ClassLoaderData* loader_data) {
+  return (class_name == vmSymbols::java_util_SwissTableBuffer() &&
           loader_data->is_the_null_class_loader_data());
 }
 
@@ -454,6 +461,9 @@ InstanceKlass* InstanceKlass::allocate_instance_klass(const ClassFileParser& par
   } else if (is_stack_chunk_class(class_name, loader_data)) {
     // stack chunk
     ik = new (loader_data, size, THREAD) InstanceStackChunkKlass(parser);
+  } else if (is_swiss_table_buffer_class(class_name, loader_data)) {
+    // swiss table storage (variable sized, trailing references)
+    ik = new (loader_data, size, THREAD) InstanceSwissTableBufferKlass(parser);
   } else if (is_class_loader(class_name, parser)) {
     // class loader - java.lang.ClassLoader
     ik = new (loader_data, size, THREAD) InstanceClassLoaderKlass(parser);
@@ -1476,7 +1486,35 @@ instanceOop InstanceKlass::register_finalizer(instanceOop i, TRAPS) {
   return h_i();
 }
 
+InstanceKlass* InstanceKlass::native_collection_representation() const {
+  if (vmClasses::HashMap_klass_is_loaded() && this == vmClasses::HashMap_klass()) {
+    return vmClasses::SwissTable_klass_is_loaded() ? vmClasses::SwissTable_klass() : nullptr;
+  }
+  return nullptr;
+}
+
+bool InstanceKlass::has_independent_layout() const {
+  return vmClasses::SwissTable_klass_is_loaded() && this == vmClasses::SwissTable_klass();
+}
+
+Klass* InstanceKlass::native_collection_reported_class(Klass* k) {
+  if (vmClasses::SwissTable_klass_is_loaded() && k == vmClasses::SwissTable_klass()) {
+    return vmClasses::HashMap_klass();
+  }
+  return k;
+}
+
 instanceOop InstanceKlass::allocate_instance(TRAPS) {
+  if (UseSwissTable) {
+    // Every allocation of exactly HashMap that reaches the runtime (interpreter,
+    // compiled-code slow paths, reflection, Unsafe.allocateInstance, JNI, deserialization)
+    // produces the native representation. Its class initializer allocates no collections.
+    InstanceKlass* native = native_collection_representation();
+    if (native != nullptr) {
+      native->initialize(CHECK_NULL);
+      return native->allocate_instance(THREAD);
+    }
+  }
   bool has_finalizer_flag = has_finalizer(); // Query before possible GC
   size_t size = size_helper();  // Query before forming handle.
 
@@ -1686,7 +1724,13 @@ Klass* InstanceKlass::find_field(Symbol* name, Symbol* sig, fieldDescriptor* fd)
   }
   // 3) apply field lookup recursively if superclass exists
   { Klass* supr = super();
-    if (supr != nullptr) return InstanceKlass::cast(supr)->find_field(name, sig, fd);
+    if (supr != nullptr) {
+      Klass* holder = InstanceKlass::cast(supr)->find_field(name, sig, fd);
+      if (holder != nullptr && !fd->is_static() && has_independent_layout()) {
+        return nullptr;     // this layout does not contain the superclasses' instance fields
+      }
+      return holder;
+    }
   }
   // 4) otherwise field lookup fails
   return nullptr;
@@ -1706,7 +1750,12 @@ Klass* InstanceKlass::find_field(Symbol* name, Symbol* sig, bool is_static, fiel
   }
   // 3) apply field lookup recursively if superclass exists
   { Klass* supr = super();
-    if (supr != nullptr) return InstanceKlass::cast(supr)->find_field(name, sig, is_static, fd);
+    if (supr != nullptr) {
+      if (!is_static && has_independent_layout()) {
+        return nullptr;     // this layout does not contain the superclasses' instance fields
+      }
+      return InstanceKlass::cast(supr)->find_field(name, sig, is_static, fd);
+    }
   }
   // 4) otherwise field lookup fails
   return nullptr;
@@ -1729,6 +1778,9 @@ bool InstanceKlass::find_field_from_offset(int offset, bool is_static, fieldDesc
   while (klass != nullptr) {
     if (InstanceKlass::cast(klass)->find_local_field_from_offset(offset, is_static, fd)) {
       return true;
+    }
+    if (!is_static && InstanceKlass::cast(klass)->has_independent_layout()) {
+      return false;         // the superclasses' instance fields are not part of this layout
     }
     klass = klass->super();
   }
@@ -1774,7 +1826,7 @@ void InstanceKlass::do_local_static_fields(void f(fieldDescriptor*, Handle, TRAP
 
 void InstanceKlass::do_nonstatic_fields(FieldClosure* cl) {
   InstanceKlass* super = superklass();
-  if (super != nullptr) {
+  if (super != nullptr && !has_independent_layout()) {
     super->do_nonstatic_fields(cl);
   }
   for (JavaFieldStream fs(this); !fs.done(); fs.next()) {
@@ -1791,7 +1843,7 @@ static int compare_fields_by_offset(FieldInfo* a, FieldInfo* b) {
 
 void InstanceKlass::print_nonstatic_fields(FieldClosure* cl) {
   InstanceKlass* super = superklass();
-  if (super != nullptr) {
+  if (super != nullptr && !has_independent_layout()) {
     super->print_nonstatic_fields(cl);
   }
   ResourceMark rm;

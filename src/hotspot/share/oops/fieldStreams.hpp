@@ -200,7 +200,7 @@ class HierarchicalFieldStream : public StackObj  {
     assert(_next_klass != nullptr, "reached end of types already");
     InstanceKlass* result = _next_klass;
     do  {
-      if (!result->is_interface() && result->super() != nullptr) {
+      if (!result->is_interface() && result->super() != nullptr && !result->has_independent_layout()) {
         result = result->java_super();
       } else if (_interface_index > 0) {
         result = _interfaces->at(--_interface_index);

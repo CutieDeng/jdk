@@ -651,6 +651,15 @@ class methodHandle;
    do_name(     writebackPreSync0_name,                                 "writebackPreSync0")                                     \
   do_intrinsic(_writebackPostSync0,       jdk_internal_misc_Unsafe,    writebackPostSync0_name, void_method_signature , F_RN)    \
    do_name(     writebackPostSync0_name,                                "writebackPostSync0")                                    \
+  do_intrinsic(_swissTableBufferAllocate, java_util_SwissTableBuffer,   allocate_name, swissTableBufferAllocate_signature, F_SN) \
+   do_name(     allocate_name,                                          "allocate")                                              \
+   do_signature(swissTableBufferAllocate_signature,                     "(I)Ljava/util/SwissTableBuffer;")                       \
+  do_intrinsic(_swissMatchTag,            java_util_SwissTable,         matchTagAt_name, swissMatchTag_signature, F_S)           \
+   do_name(     matchTagAt_name,                                        "matchTagAt")                                            \
+   do_signature(swissMatchTag_signature,                                "(Ljava/util/SwissTableBuffer;JI)J")                     \
+  do_intrinsic(_swissFirstTagLane,        java_util_SwissTable,         firstTagLaneAt_name, swissFirstTagLane_signature, F_S)   \
+   do_name(     firstTagLaneAt_name,                                    "firstTagLaneAt")                                        \
+   do_signature(swissFirstTagLane_signature,                            "(Ljava/util/SwissTableBuffer;JI)I")                     \
   do_intrinsic(_allocateInstance,         jdk_internal_misc_Unsafe,     allocateInstance_name, allocateInstance_signature, F_RN) \
    do_name(     allocateInstance_name,                                  "allocateInstance")                                      \
    do_signature(allocateInstance_signature,                             "(Ljava/lang/Class;)Ljava/lang/Object;")                 \
