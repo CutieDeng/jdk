@@ -25,17 +25,29 @@
 package jdk.internal.util;
 
 /**
- * Field access guard for the native representation of {@code java.util.HashMap}
- * ({@code -XX:+UseSwissTable}). A native HashMap (java.util.SwissTable) is laid out
- * without the instance fields of HashMap and AbstractMap, but getClass() of it reports HashMap,
- * so a reflective accessor, method handle or VarHandle for such a field would otherwise read or
- * write memory of a different field, or past the object. Accessors for these fields call
- * {@link #checkReceiver} first; all other accessors are unaffected.
+ * Support for the native representation of {@code java.util.HashMap}, java.util.SwissTable
+ * ({@code -XX:+UseSwissTable}).
+ *
+ * <p>Field access guard: a SwissTable is laid out without the instance fields of HashMap and
+ * AbstractMap, but getClass() of it reports HashMap, so a reflective accessor, method handle or
+ * VarHandle for such a field would otherwise read or write memory of a different field, or past
+ * the object. Accessors for these fields call {@link #checkReceiver} first; all other accessors
+ * are unaffected.
+ *
+ * <p>{@link #swissTableClass} tells the parts of java.base that construct or serialize HashMaps
+ * themselves (constructor method handles, java.io) whether to use SwissTable.
  */
 public final class NativeCollections {
     private NativeCollections() {}
 
     private static final Class<?> NATIVE_HASH_MAP = nativeHashMapClass();
+
+    /**
+     * SwissTable when the VM redirects allocations of exactly HashMap to it, else null. This class
+     * is not a HashMap subclass, so its own {@code new HashMap<>()} shows which is the case.
+     */
+    private static final Class<?> SWISS_TABLE =
+            NATIVE_HASH_MAP != null && NATIVE_HASH_MAP.isInstance(new java.util.HashMap<>()) ? NATIVE_HASH_MAP : null;
 
     private static Class<?> nativeHashMapClass() {
         try {
@@ -43,6 +55,11 @@ public final class NativeCollections {
         } catch (ClassNotFoundException e) {
             return null;
         }
+    }
+
+    /** java.util.SwissTable under -XX:+UseSwissTable, else null. */
+    public static Class<?> swissTableClass() {
+        return SWISS_TABLE;
     }
 
     /** Whether accessors of this field need {@link #checkReceiver}. */

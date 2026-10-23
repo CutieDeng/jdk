@@ -1176,6 +1176,17 @@ oop Reflection::invoke_constructor(oop constructor_mirror, objArrayHandle args, 
   methodHandle method(THREAD, m);
   assert(method->name() == vmSymbols::object_initializer_name(), "invalid constructor");
 
+  if (UseSwissTable && klass == vmClasses::HashMap_klass()) {
+    // A HashMap constructor called reflectively constructs a SwissTable with SwissTable's
+    // constructor of the same descriptor, as `new HashMap(...)` in bytecode does (access was
+    // checked against the HashMap constructor).
+    Method* target = InstanceKlass::swiss_table_call_target(method(), nullptr, true);
+    if (target != nullptr) {
+      klass = target->method_holder();
+      method = methodHandle(THREAD, target);
+    }
+  }
+
   // Make sure klass gets initialize
   klass->initialize(CHECK_NULL);
 

@@ -394,11 +394,12 @@ public:
   VM_CLASSES_DO(VM_CLASS_FUNC)
 #undef VM_CLASS_FUNC
 
-  // UseSwissTable: the native representation allocated for exactly k, or null. Matched by
-  // name, so it also applies to a constant pool reference that is unresolved or not loaded by its
-  // initiating loader: java.* classes are defined only by the boot loader, so these names denote
-  // the boot classes from every loader.
-  ciInstanceKlass* native_collection_representation(ciKlass* k);
+  // UseSwissTable: the native representation allocated for exactly k by code of `requester`,
+  // or null (InstanceKlass::swiss_table_redirects). Matched by name, so it also applies to a
+  // constant pool reference that is unresolved or not loaded by its initiating loader: java.*
+  // classes are defined only by the boot loader, so these names denote the boot classes from
+  // every loader.
+  ciInstanceKlass* native_collection_representation(ciKlass* k, ciInstanceKlass* requester);
 
   ciInstance* NullPointerException_instance() {
     assert(_NullPointerException_instance != nullptr, "initialization problem");

@@ -1486,11 +1486,70 @@ instanceOop InstanceKlass::register_finalizer(instanceOop i, TRAPS) {
   return h_i();
 }
 
-InstanceKlass* InstanceKlass::native_collection_representation() const {
-  if (vmClasses::HashMap_klass_is_loaded() && this == vmClasses::HashMap_klass()) {
-    return vmClasses::SwissTable_klass_is_loaded() ? vmClasses::SwissTable_klass() : nullptr;
+bool InstanceKlass::swiss_table_redirects(const Klass* requester) {
+  if (!UseSwissTable || !vmClasses::SwissTable_klass_is_loaded()) {
+    return false;
+  }
+  if (requester == nullptr) {
+    return true;
+  }
+  return !requester->is_subclass_of(vmClasses::HashMap_klass()) &&
+         !requester->is_subclass_of(vmClasses::reflect_MagicAccessorImpl_klass());
+}
+
+InstanceKlass* InstanceKlass::native_collection_representation(const Klass* requester) const {
+  if (vmClasses::HashMap_klass_is_loaded() && this == vmClasses::HashMap_klass() &&
+      swiss_table_redirects(requester)) {
+    return vmClasses::SwissTable_klass();
   }
   return nullptr;
+}
+
+Method* InstanceKlass::swiss_table_call_target(const Method* resolved, const Klass* requester, bool is_special) {
+  if (!vmClasses::SwissTable_klass_is_loaded() || resolved->method_holder() != vmClasses::HashMap_klass()) {
+    return nullptr;
+  }
+  InstanceKlass* swiss = vmClasses::SwissTable_klass();
+  if (is_special && resolved->is_object_initializer()) {
+    if (requester == swiss) {
+      // super() in SwissTable's constructors: run AbstractMap(), not a HashMap constructor. With
+      // or without UseSwissTable: SwissTable never has HashMap's fields (see ClassFileParser).
+      guarantee(resolved->signature() == vmSymbols::void_method_signature(),
+                "SwissTable's constructors call super() only");
+      InstanceKlass* abstract_map = InstanceKlass::cast(vmClasses::HashMap_klass()->super());
+      return abstract_map->find_method(vmSymbols::object_initializer_name(), vmSymbols::void_method_signature());
+    }
+    if (swiss_table_redirects(requester)) {
+      return swiss->find_method(vmSymbols::object_initializer_name(), resolved->signature());
+    }
+  } else if (!is_special && resolved->is_static() && resolved->name()->equals("newHashMap") &&
+             swiss_table_redirects(requester)) {
+    return swiss->find_method(resolved->name(), resolved->signature());
+  }
+  return nullptr;
+}
+
+bool InstanceKlass::swiss_table_counterparts_complete(const char** missing) {
+  InstanceKlass* base = vmClasses::HashMap_klass();
+  InstanceKlass* swiss = vmClasses::SwissTable_klass();
+  Array<Method*>* methods = base->methods();
+  for (int i = 0; i < methods->length(); i++) {
+    Method* m = methods->at(i);
+    bool needed = m->is_object_initializer() || (m->is_static() && m->name()->equals("newHashMap"));
+    if (needed) {
+      Method* counterpart = swiss->find_method(m->name(), m->signature());
+      if (counterpart == nullptr || counterpart->is_static() != m->is_static()) {
+        *missing = m->name_and_sig_as_C_string();
+        return false;
+      }
+    }
+  }
+  InstanceKlass* abstract_map = InstanceKlass::cast(base->super());
+  if (abstract_map->find_method(vmSymbols::object_initializer_name(), vmSymbols::void_method_signature()) == nullptr) {
+    *missing = "java.util.AbstractMap.<init>()V";
+    return false;
+  }
+  return true;
 }
 
 bool InstanceKlass::has_independent_layout() const {
@@ -1505,16 +1564,6 @@ Klass* InstanceKlass::native_collection_reported_class(Klass* k) {
 }
 
 instanceOop InstanceKlass::allocate_instance(TRAPS) {
-  if (UseSwissTable) {
-    // Every allocation of exactly HashMap that reaches the runtime (interpreter,
-    // compiled-code slow paths, reflection, Unsafe.allocateInstance, JNI, deserialization)
-    // produces the native representation. Its class initializer allocates no collections.
-    InstanceKlass* native = native_collection_representation();
-    if (native != nullptr) {
-      native->initialize(CHECK_NULL);
-      return native->allocate_instance(THREAD);
-    }
-  }
   bool has_finalizer_flag = has_finalizer(); // Query before possible GC
   size_t size = size_helper();  // Query before forming handle.
 

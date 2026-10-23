@@ -220,6 +220,16 @@ JRT_ENTRY(void, InterpreterRuntime::_new(JavaThread* current, ConstantPool* pool
   Klass* k = pool->klass_at(index, CHECK);
   InstanceKlass* klass = InstanceKlass::cast(k);
 
+  if (UseSwissTable) {
+    // An allocation of exactly HashMap requested outside HashMap and its subclasses produces
+    // SwissTable; the constructor call that follows it in the same class binds to SwissTable's
+    // constructor (LinkResolver::resolve_invokespecial). HashMap is slow-path for this.
+    InstanceKlass* native = klass->native_collection_representation(pool->pool_holder());
+    if (native != nullptr) {
+      klass = native;
+    }
+  }
+
   // Make sure we are not instantiating an abstract klass
   klass->check_valid_for_instantiation(true, CHECK);
 

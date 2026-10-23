@@ -2242,13 +2242,13 @@ void GraphBuilder::new_instance(int klass_index) {
   assert(klass->is_instance_klass(), "must be an instance klass");
   bool is_unresolved = stream()->is_unresolved_klass();
   if (UseSwissTable) {
-    // An allocation of exactly HashMap always produces the native representation, and
-    // the NewInstance's exact type is what C1 binds calls on the new object to (the inlined
-    // constructor's init() among them), so allocate the native class here in every case: when the
+    // An allocation of exactly HashMap requested outside HashMap and its subclasses produces the
+    // native representation, whose constructor the following constructor call binds to (ciEnv
+    // looks it up as LinkResolver does). Allocate the native class here in every such case: when the
     // constant pool entry is still unresolved (its name can only denote the boot class, so no
     // resolution is needed) and when the native class is not initialized yet (the allocation then
     // takes the initialization-checking path).
-    ciInstanceKlass* native = ciEnv::current()->native_collection_representation(klass);
+    ciInstanceKlass* native = ciEnv::current()->native_collection_representation(klass, method()->holder());
     if (native != nullptr && native->is_loaded()) {
       klass = native;
       is_unresolved = false;

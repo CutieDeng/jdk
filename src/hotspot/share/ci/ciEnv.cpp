@@ -481,10 +481,23 @@ bool ciEnv::check_klass_accessibility(ciKlass* accessing_klass,
 
 // ------------------------------------------------------------------
 // ciEnv::native_collection_representation
-ciInstanceKlass* ciEnv::native_collection_representation(ciKlass* k) {
-  if (k == nullptr) return nullptr;
-  if (k->name() == ciSymbols::java_util_HashMap())   return SwissTable_klass();
-  return nullptr;
+ciInstanceKlass* ciEnv::native_collection_representation(ciKlass* k, ciInstanceKlass* requester) {
+  if (k == nullptr || k->name() != ciSymbols::java_util_HashMap()) return nullptr;
+  bool redirects;
+  GUARDED_VM_ENTRY(redirects = InstanceKlass::swiss_table_redirects(requester == nullptr ? nullptr : requester->get_Klass());)
+  return redirects ? SwissTable_klass() : nullptr;
+}
+
+// The target the interpreter binds a call of m from code of accessor to (the SwissTable cases of
+// LinkResolver::resolve_invokespecial, resolve_invokestatic), so that compiled code agrees.
+static Method* with_swiss_table_target(Method* m, InstanceKlass* accessor, bool is_special) {
+  if (m != nullptr) {
+    Method* target = InstanceKlass::swiss_table_call_target(m, accessor, is_special);
+    if (target != nullptr) {
+      return target;
+    }
+  }
+  return m;
 }
 
 // ------------------------------------------------------------------
@@ -847,9 +860,9 @@ Method* ciEnv::lookup_method(ciInstanceKlass* accessor,
                      tag);
   switch (bc) {
     case Bytecodes::_invokestatic:
-      return LinkResolver::resolve_static_call_or_null(link_info);
+      return with_swiss_table_target(LinkResolver::resolve_static_call_or_null(link_info), accessor_klass, false);
     case Bytecodes::_invokespecial:
-      return LinkResolver::resolve_special_call_or_null(link_info);
+      return with_swiss_table_target(LinkResolver::resolve_special_call_or_null(link_info), accessor_klass, true);
     case Bytecodes::_invokeinterface:
       return LinkResolver::linktime_resolve_interface_method_or_null(link_info);
     case Bytecodes::_invokevirtual:

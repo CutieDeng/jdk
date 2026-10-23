@@ -40,10 +40,7 @@ final class SwissTableBuffer {
     final int capacity;
     /** Inserts into EMPTY slots possible before a rehash. */
     int growthLeft;
-    /**
-     * Null; or the Float load factor a map was constructed with when it is not the default; or,
-     * on a capacity-0 table, the node-based delegate of a map after a collision flood.
-     */
+    /** Null, or the Float load factor a map was constructed with when it is not the default. */
     Object aux;
 
     private SwissTableBuffer() {

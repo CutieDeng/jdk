@@ -813,9 +813,23 @@ public:
   // allocation
   instanceOop allocate_instance(TRAPS);
 
-  // UseSwissTable: the class an allocation of exactly this class produces instead
-  // (SwissTable for HashMap), or null.
-  InstanceKlass* native_collection_representation() const;
+  // UseSwissTable. An allocation of exactly java.util.HashMap and the constructor call that
+  // initializes it are redirected together to java.util.SwissTable, as decided by the class whose
+  // code requests them: never in HashMap and its subclasses (their constructors run HashMap's
+  // constructors on this) nor in the generated reflection accessors (a serialization constructor
+  // allocates HashMap and runs AbstractMap()), always elsewhere; null (native code) redirects.
+  static bool swiss_table_redirects(const Klass* requester);
+  // UseSwissTable: the class an allocation of exactly this class requested by code of
+  // `requester` produces instead (SwissTable for HashMap), or null.
+  InstanceKlass* native_collection_representation(const Klass* requester) const;
+  // The method a call of `resolved` (invokespecial or invokestatic) from code of `requester`
+  // runs instead, or null. AbstractMap() for the super() of SwissTable's constructors, always;
+  // under UseSwissTable also SwissTable's constructor with the same descriptor for a HashMap
+  // constructor where allocations are redirected, and SwissTable.newHashMap for HashMap.newHashMap.
+  static Method* swiss_table_call_target(const Method* resolved, const Klass* requester, bool is_special);
+  // UseSwissTable: whether SwissTable has a counterpart for every HashMap constructor and for
+  // HashMap.newHashMap (checked once at startup; the redirection depends on it).
+  static bool swiss_table_counterparts_complete(const char** missing);
   // UseSwissTable: the class whose mirror Object.getClass() reports for an object of
   // class k (the base class for a native representation, else k itself).
   static Klass* native_collection_reported_class(Klass* k);

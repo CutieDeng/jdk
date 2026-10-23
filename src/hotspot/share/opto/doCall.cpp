@@ -612,6 +612,22 @@ void Parse::do_call() {
     set_stack(sp() - nargs, casted_receiver);
   }
 
+  if (UseSwissTable && iter().cur_bc_raw() == Bytecodes::_invokespecial &&
+      orig_callee->is_object_initializer() && holder_klass != klass &&
+      holder_klass == C->env()->SwissTable_klass()) {
+    // A HashMap constructor call bound to SwissTable's constructor (ciEnv::lookup_method): the
+    // receiver is the SwissTable the matching allocation in this method produced (Parse::do_new,
+    // ciTypeFlow::StateVector::do_new). Type it exactly, so that the constructor's field accesses
+    // are not attributed to HashMap's layout.
+    Node* receiver_node = stack(sp() - nargs);
+    const TypeOopPtr* receiver_type = _gvn.type(receiver_node)->isa_oopptr();
+    assert(receiver_type == nullptr || receiver_type->klass_is_exact() == false ||
+           receiver_type->is_instptr()->instance_klass() == holder_klass,
+           "redirected constructor call on an allocation that was not redirected");
+    const Type* exact = TypeOopPtr::make_from_klass(holder_klass)->cast_to_exactness(true);
+    set_stack(sp() - nargs, _gvn.transform(new CheckCastPPNode(control(), receiver_node, exact)));
+  }
+
   // Note:  It's OK to try to inline a virtual call.
   // The call generator will not attempt to inline a polymorphic call
   // unless it knows how to optimize the receiver dispatch.

@@ -33,6 +33,7 @@
 #include "classfile/vmSymbols.hpp"
 #include "gc/shared/collectedHeap.hpp"
 #include "memory/metaspaceClosure.hpp"
+#include "memory/resourceArea.hpp"
 #include "memory/universe.hpp"
 #include "oops/instanceKlass.hpp"
 #include "oops/instanceRefKlass.hpp"
@@ -198,15 +199,25 @@ void vmClasses::resolve_all(TRAPS) {
 
   CollectedHeap::set_filler_object_klass(vmClasses::FillerObject_klass());
 
-  // UseSwissTable: allocations of exactly HashMap produce its native representation,
-  // SwissTable. Mark the base class slow-path so every fast allocation path that did not
-  // substitute the class itself (interpreter template, compiled code that fell back) reaches
-  // InstanceKlass::allocate_instance, which redirects. Done here rather than in the class file
-  // parser so that classes restored from the CDS archive are covered as well.
+  // UseSwissTable: allocations of exactly HashMap, with the constructor calls that initialize
+  // them, are redirected to its native representation, SwissTable, depending on the requesting
+  // class (InstanceKlass::swiss_table_redirects). The interpreter decides in its allocation slow
+  // path, so mark the base class slow-path; the compilers decide per allocation site. Done here
+  // rather than in the class file parser so that classes restored from the CDS archive are
+  // covered as well.
   if (UseSwissTable && DumpSharedSpaces) {
     // A static archive stores this JVM's class layouts and heap objects: keep both stock.
     warning("-XX:+UseSwissTable is ignored when dumping a static CDS archive");
     FLAG_SET_ERGO(UseSwissTable, false);
+  }
+  if (UseSwissTable) {
+    // A redirected constructor call needs SwissTable's constructor with the same descriptor.
+    ResourceMark rm;
+    const char* missing = nullptr;
+    if (!InstanceKlass::swiss_table_counterparts_complete(&missing)) {
+      warning("-XX:+UseSwissTable is ignored: java.util.SwissTable has no counterpart of %s", missing);
+      FLAG_SET_ERGO(UseSwissTable, false);
+    }
   }
   if (UseSwissTable) {
     InstanceKlass* base = vmClasses::HashMap_klass();

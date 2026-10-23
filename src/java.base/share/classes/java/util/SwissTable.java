@@ -25,6 +25,7 @@
 package java.util;
 
 import java.io.IOException;
+import java.io.InvalidObjectException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.util.function.BiConsumer;
@@ -35,14 +36,20 @@ import java.util.function.Function;
 import jdk.internal.access.SharedSecrets;
 import jdk.internal.misc.Unsafe;
 import jdk.internal.vm.annotation.DontInline;
-import jdk.internal.vm.annotation.ForceInline;
 import jdk.internal.vm.annotation.IntrinsicCandidate;
 
 /**
  * Swiss-table representation of {@link HashMap}: what an allocation of exactly {@code HashMap}
  * produces under {@code -XX:+UseSwissTable}; {@code Object.getClass()} reports
  * {@code HashMap}. {@code HashMap} keeps the node-based implementation, which {@link LinkedHashMap}
- * extends; every {@code HashMap} method that touches HashMap's own state is overridden here.
+ * extends. No code of {@code HashMap} runs on a SwissTable: every overridable method is overridden
+ * here, and the VM redirects the rest. Code outside HashMap and its subclasses that allocates
+ * exactly {@code HashMap} gets a SwissTable and the SwissTable constructor with the same parameters
+ * (bytecode in the interpreter and both compilers, JNI {@code NewObject}, core reflection); the
+ * constructor handles of {@code java.lang.invoke} do the same, {@code HashMap.newHashMap} binds to
+ * {@link #newHashMap}, and serialization runs this class's {@code writeObject}/{@code readObject},
+ * which keep HashMap's serial form. The constructors here call {@code super()}, which the VM binds
+ * to {@code AbstractMap()}.
  *
  * <p>Storage. The map holds one pointer, {@link #buf}, to a single VM-defined buffer, a
  * {@link SwissTableBuffer}: its control bytes followed by its key/value references, one heap object per
@@ -63,12 +70,11 @@ import jdk.internal.vm.annotation.IntrinsicCandidate;
  * invariant. An erased slot becomes EMPTY if its group still has an EMPTY slot, else DELETED;
  * tombstones are purged by rehashing at the same capacity. Tables grow 2x.
  *
- * <p>Collision floods. Keys with equal {@code hashCode} share one probe sequence and no mixing can
- * separate them (node-based {@code HashMap} bounds this by treeifying a bin, JEP 180). An insert
- * whose probe passes more than {@code MAX_PROBE_GROUPS} groups without a free slot, or that would
- * grow the table beyond the largest capacity the VM allocates, moves every mapping into a
- * node-based delegate kept in {@link SwissTableBuffer#aux} of a capacity-0 table; from then on each
- * operation forwards to it, and {@code clear()} returns to the table.
+ * <p>Equal hash codes. Keys with equal {@code hashCode} share one probe sequence and no mixing can
+ * separate them, so each operation on such a key compares it with all of them: n such keys cost
+ * O(n) per operation and O(n^2) to insert. There is no fallback: node-based {@code HashMap} bounds
+ * this with tree bins (JEP 180), this class does not. A table at the largest capacity the VM
+ * allocates fills its free slots past the 7/8 limit, then an insert throws OutOfMemoryError.
  *
  * <p>Iteration order is slot order. It differs from node-based {@code HashMap}'s order (the
  * specification makes no ordering promise) but is the same in every run for the same hash codes
@@ -106,8 +112,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     static final long LOW_BITS = 0x0101010101010101L;
     static final long GOLDEN = 0x9E3779B97F4A7C15L;
     static final float DEFAULT_LOAD_FACTOR = 0.75f;
-    /** Probe length, in groups, beyond which an insert treats the keys as a collision flood. */
-    static final int MAX_PROBE_GROUPS = 32;
 
     /** The table of every empty map with the default load factor; never written. */
     private static final SwissTableBuffer EMPTY_TABLE = SwissTableBuffer.allocate(0);
@@ -116,8 +120,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
      * Instance state. The VM lays this class out without the fields of HashMap and AbstractMap
      * (see ClassFileParser), so an instance is an object header and these three fields, 24 bytes
      * with compressed oops; no code that runs on it may name an inherited field.
-     *   buf        the table; EMPTY_TABLE or a capacity-0 table while nothing is allocated, a
-     *              capacity-0 table holding the delegate after a collision flood
+     *   buf        the table; EMPTY_TABLE or a capacity-0 table while nothing is allocated
      *   size       number of full slots
      *   modCount   structural modifications, for fail-fast iteration
      * The load factor requested at construction only matters for the serial form; a non-default
@@ -127,25 +130,47 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     transient int size;
     transient int modCount;
 
-    /** Node-based HashMap used as the flood delegate; a subclass, so never redirected. */
-    static final class Overflow<K,V> extends HashMap<K,V> {
-        @java.io.Serial
-        private static final long serialVersionUID = 1L;
-        Overflow(int initialCapacity, float loadFactor) { super(initialCapacity, loadFactor); }
-    }
 
     // ---- construction ------------------------------------------------------------------------
+    // One constructor per HashMap constructor, with the same parameters, checks and exceptions:
+    // `new HashMap(...)` outside HashMap and its subclasses runs these (the VM checks at startup
+    // that each HashMap constructor has its counterpart). super() runs AbstractMap() (the VM binds
+    // it so): no HashMap constructor runs on a SwissTable.
 
-    SwissTable() { super(); }
-    SwissTable(int initialCapacity) { super(initialCapacity); }
-    SwissTable(int initialCapacity, float loadFactor) { super(initialCapacity, loadFactor); }
-    SwissTable(Map<? extends K, ? extends V> m) { super(m); }
+    SwissTable() {
+        super();
+        buf = EMPTY_TABLE;
+    }
 
-    /** Every HashMap constructor ends here; arguments are already validated. */
-    @Override
-    void init(int initialCapacity, float loadFactor) {
-        // kept small so that C2 inlines it into the constructors
+    SwissTable(int initialCapacity) {
+        this(initialCapacity, DEFAULT_LOAD_FACTOR);
+    }
+
+    SwissTable(int initialCapacity, float loadFactor) {
+        super();
+        if (initialCapacity < 0)
+            throw new IllegalArgumentException("Illegal initial capacity: " +
+                                               initialCapacity);
+        if (initialCapacity > MAXIMUM_CAPACITY)
+            initialCapacity = MAXIMUM_CAPACITY;
+        if (loadFactor <= 0 || Float.isNaN(loadFactor))
+            throw new IllegalArgumentException("Illegal load factor: " +
+                                               loadFactor);
         buf = initialCapacity > 0 ? presizedTable(initialCapacity, loadFactor) : emptyTable(loadFactor);
+    }
+
+    SwissTable(Map<? extends K, ? extends V> m) {
+        super();
+        buf = EMPTY_TABLE;
+        putAllEntries(m);
+    }
+
+    /** {@link HashMap#newHashMap}, which the VM binds calls from outside HashMap and its subclasses to. */
+    public static <K, V> HashMap<K, V> newHashMap(int numMappings) {
+        if (numMappings < 0) {
+            throw new IllegalArgumentException("Negative number of mappings: " + numMappings);
+        }
+        return new SwissTable<>(calculateHashMapCapacity(numMappings));
     }
 
     /** HashMap(n, lf) holds n * lf mappings before its first resize; hold as many. */
@@ -263,15 +288,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
 
     private static void setValue(SwissTableBuffer t, long refs, int i, Object v) { U.putReference(t, valueOffset(refs, i), v); }
 
-    /**
-     * The flood delegate, or null. Forced inline: callers branch on the result, and a call here
-     * would hide that the delegate is absent in the common case.
-     */
-    @ForceInline
-    @SuppressWarnings("unchecked")
-    private static <K,V> HashMap<K,V> overflow(SwissTableBuffer t) {
-        return t.aux instanceof HashMap<?,?> o ? (HashMap<K,V>) o : null;
-    }
 
     // ---- hashing and group matching ----------------------------------------------------------
 
@@ -389,7 +405,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
      * One probe for put-like operations. Returns the key offset of {@code key} if present (>= 0).
      * Otherwise the key is absent and the result is {@code ~off}, where {@code off} is the key
      * offset of the first EMPTY or DELETED slot on the probe sequence; or {@code NO_SLOT} if t has
-     * no slots or that slot lies beyond the flood limit.
+     * no slots, or none is free (only at the largest capacity, or after racing writers).
      */
     static int findOrFree(SwissTableBuffer t, Object key, long p) {
         int cap = t.capacity;
@@ -416,7 +432,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         int tag = tagByte(p);
         int g = h1(p) & gmask;
         int free = -1;          // first free slot, -1 while none seen
-        boolean far = false;    // the first free slot is beyond the flood limit
         for (int step = 0; ; ) {
             long w = ctrlWord(t, g);
             for (long m = matchTagAt(t, CTRL_BASE + ((long) g << 3), tag); m != 0; m &= m - 1) {
@@ -424,19 +439,16 @@ final class SwissTable<K,V> extends HashMap<K,V> {
                 Object k = U.getReference(t, off);
                 if (k == key || (key != null && key.equals(k))) return off;
             }
-            if (free < 0 && !far) {
+            if (free < 0) {
                 long f = matchFree(w);
-                if (f != 0) {
-                    if (step > MAX_PROBE_GROUPS) far = true;
-                    else free = (g << 3) + lane(f);
-                }
+                if (f != 0) free = (g << 3) + lane(f);
             }
             if (matchEmpty(w) != 0 || step == gmask) return free >= 0 ? ~keyOff(cap, free) : NO_SLOT;
             g = (g + ++step) & gmask;
         }
     }
 
-    /** {@link #findOrFree} result: absent, and no usable free slot (no slots, or flood). */
+    /** {@link #findOrFree} result: absent, and no free slot (no slots, or none free). */
     static final int NO_SLOT = Integer.MIN_VALUE;
 
     /** First full slot of t in {@code [from, n)}, or {@code n}; {@code n} is at most the capacity. */
@@ -456,41 +468,28 @@ final class SwissTable<K,V> extends HashMap<K,V> {
 
     @Override
     public int size() {
-        HashMap<K,V> o = overflow(buf);
-        return o == null ? size : o.size();
+        return size;
     }
 
-    @Override public boolean isEmpty() { return size() == 0; }
-
-    /*
-     * The hottest operations probe first and look at the flood delegate only when the probe finds
-     * nothing: a degraded map's table has no slots, so every probe misses at once.
-     */
+    @Override public boolean isEmpty() { return size == 0; }
 
     @Override
     public V get(Object key) {
         SwissTableBuffer t = buf;
         int off = find(t, key, spread(key));
-        if (off >= 0) return refAt(t, off + REF_SIZE);
-        HashMap<K,V> o = overflow(t);
-        return o == null ? null : o.get(key);
+        return off >= 0 ? refAt(t, off + REF_SIZE) : null;
     }
 
     @Override
     public boolean containsKey(Object key) {
-        SwissTableBuffer t = buf;
-        if (find(t, key, spread(key)) >= 0) return true;
-        HashMap<K,V> o = overflow(t);
-        return o != null && o.containsKey(key);
+        return find(buf, key, spread(key)) >= 0;
     }
 
     @Override
     public V getOrDefault(Object key, V defaultValue) {
         SwissTableBuffer t = buf;
         int off = find(t, key, spread(key));
-        if (off >= 0) return refAt(t, off + REF_SIZE);
-        HashMap<K,V> o = overflow(t);
-        return o == null ? defaultValue : o.getOrDefault(key, defaultValue);
+        return off >= 0 ? refAt(t, off + REF_SIZE) : defaultValue;
     }
 
     @Override
@@ -502,10 +501,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
             V old = refAt(t, r + REF_SIZE);
             setRef(t, r + REF_SIZE, value);
             return old;
-        }
-        if (r == NO_SLOT) {                               // only a table without slots can be degraded
-            HashMap<K,V> o = overflow(t);
-            if (o != null) return o.put(key, value);
         }
         insertAt(t, r, key, value, p);
         return null;
@@ -520,10 +515,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
             V old = refAt(t, r + REF_SIZE);
             if (old == null) setRef(t, r + REF_SIZE, value);
             return old;
-        }
-        if (r == NO_SLOT) {                               // only a table without slots can be degraded
-            HashMap<K,V> o = overflow(t);
-            if (o != null) return o.putIfAbsent(key, value);
         }
         insertAt(t, r, key, value, p);
         return null;
@@ -556,7 +547,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
                 place(t, off, key, value, g, w, j, p);
                 return;
             }
-        } else if (t.capacity == 0 && t == buf && overflow(t) == null) {
+        } else if (t.capacity == 0 && t == buf) {
             insertFirst(t, key, value, p);
             return;
         }
@@ -564,8 +555,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     }
 
     /**
-     * The first insert into the table without slots of a map that is not degraded (the callers
-     * checked): a table of FIRST_CAPACITY slots, where the key takes lane 0 of its group (the new
+     * The first insert into the table without slots (the caller checked): a table of FIRST_CAPACITY slots, where the key takes lane 0 of its group (the new
      * table is all EMPTY). Small enough to inline into put(), so that a short-lived small map costs
      * two allocations.
      */
@@ -581,30 +571,23 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     @SuppressWarnings("unchecked")
     private void insertNew(Object key, Object value, long p) {
         SwissTableBuffer t = buf;
-        if (t.growthLeft <= 0) {                          // < 0 only after racing writers lost updates
+        if (t.growthLeft <= 0) {                          // < 0 at the largest capacity, or after racing writers lost updates
             t = growForInsert();
-            if (t == null) {                              // degraded: the table could not grow
-                overflow(buf).put((K) key, (V) value);
-                return;
-            }
         }
         int gmask = (t.capacity >>> 3) - 1;
         int g = h1(p) & gmask;
         long w, f;
         for (int step = 0; (f = matchFree(w = ctrlWord(t, g))) == 0; ) {
-            if (++step > MAX_PROBE_GROUPS || step > gmask) {
-                if (slotsInUse(t) > growthFor(t.capacity) && t.capacity < MAX_CAPACITY) {
-                    // More slots in use than the growth accounting allows, which only unsynchronized
-                    // concurrent writers cause: rebuild larger and count again rather than take the
-                    // probe for a collision flood (the delegate would race as node HashMap does).
+            if (++step > gmask) {                         // every group visited, none has a free slot
+                if (t.capacity < MAX_CAPACITY) {
+                    // Inserts keep 1/8 of the slots free below the largest capacity, so only
+                    // unsynchronized concurrent writers fill a table: rebuild larger, count again.
                     SwissTableBuffer n = rehash(t.capacity << 1);
                     size = growthFor(n.capacity) - n.growthLeft;
                     insertNew(key, value, p);
                     return;
                 }
-                degrade();
-                overflow(buf).put((K) key, (V) value);
-                return;
+                throw new OutOfMemoryError("SwissTable is full at its largest capacity, " + MAX_CAPACITY + " slots");
             }
             g = (g + step) & gmask;
         }
@@ -615,7 +598,8 @@ final class SwissTable<K,V> extends HashMap<K,V> {
 
     /**
      * Make room for one more insert: allocate, purge tombstones at the same capacity, or double.
-     * Returns the new table, or null after degrading because the table is at its largest capacity.
+     * Returns the table to insert into: at the largest capacity, the full one, whose remaining free
+     * slots the inserts then take (past the 7/8 limit; insertNew fails when none is left).
      * Never inlined: the rehash and purge loops it inlines then compile here, apart from the values
      * insertNew keeps live (key, value, hash). Inlined into insertNew, the rehash loop ran out of
      * registers and spilled; on Kunpeng a pair of 4-byte spill slots written one by one and read
@@ -637,8 +621,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         } else if (cap < MAX_CAPACITY) {
             return rehash(cap << 1);
         } else {
-            degrade();
-            return null;
+            return t;
         }
     }
 
@@ -749,25 +732,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         }
     }
 
-    /** Move every mapping into a node-based delegate (see the class comment on collision floods). */
-    private void degrade() {
-        SwissTableBuffer t = buf;
-        float lf = loadFactor();
-        Overflow<K,V> o = new Overflow<>((int) Math.min(Math.max(16L, (long) (size / lf) + 1), 1 << 30), lf);
-        int cap = t.capacity;
-        long refs = refs(cap);
-        for (int g = 0, groups = cap >>> 3; g < groups; g++) {
-            for (long full = matchFull(ctrlWord(t, g)); full != 0; full &= full - 1) {
-                int i = (g << 3) + lane(full);
-                o.put(keyAt(t, refs, i), valueAt(t, refs, i));
-            }
-        }
-        SwissTableBuffer holder = SwissTableBuffer.allocate(0);
-        holder.aux = o;
-        buf = holder;
-        size = 0;
-        modCount++;                                       // fail fast any iterator over the table
-    }
 
     @Override
     public V remove(Object key) {
@@ -778,15 +742,12 @@ final class SwissTable<K,V> extends HashMap<K,V> {
             eraseAt(t, off);
             return old;
         }
-        HashMap<K,V> o = overflow(t);
-        return o == null ? null : o.remove(key);
+        return null;
     }
 
     @Override
     public boolean remove(Object key, Object value) {
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.remove(key, value);
         int off = find(t, key, spread(key));
         if (off < 0) return false;
         Object v = refAt(t, off + REF_SIZE);
@@ -824,10 +785,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public void clear() {
         modCount++;
         SwissTableBuffer t = buf;
-        if (overflow(t) != null) {
-            buf = emptyTable(loadFactor());               // back to the table
-            return;
-        }
         int cap = t.capacity;
         if (cap != 0 && (size != 0 || t.growthLeft != growthFor(cap))) {
             buf = newTable(cap, t.aux);                   // keeps the capacity, like HashMap.clear()
@@ -838,8 +795,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     @Override
     public boolean containsValue(Object value) {
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.containsValue(value);
         int cap = t.capacity;
         for (int g = 0, groups = cap >>> 3; g < groups; g++) {
             for (long full = matchFull(ctrlWord(t, g)); full != 0; full &= full - 1) {
@@ -852,21 +807,15 @@ final class SwissTable<K,V> extends HashMap<K,V> {
 
     @Override
     public void putAll(Map<? extends K, ? extends V> m) {
-        putMapEntries(m, true);
+        putAllEntries(m);
     }
 
-    @Override
-    void putMapEntries(Map<? extends K, ? extends V> m, boolean evict) {
-        HashMap<K,V> o = overflow(buf);
-        if (o != null) {
-            o.putAll(m);
-            return;
-        }
+    private void putAllEntries(Map<? extends K, ? extends V> m) {
         int s = m.size();
         if (s > 0) {
             reserve((int) Math.min((long) size + s, MAX_CAPACITY));
             for (Map.Entry<? extends K, ? extends V> e : m.entrySet())
-                put(e.getKey(), e.getValue());            // put() follows a degrade mid-way
+                put(e.getKey(), e.getValue());
         }
     }
 
@@ -876,8 +825,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public V computeIfAbsent(K key, Function<? super K, ? extends V> mappingFunction) {
         if (mappingFunction == null) throw new NullPointerException();
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.computeIfAbsent(key, mappingFunction);
         long p = spread(key);
         int r = findOrFree(t, key, p);
         if (r >= 0) {
@@ -897,8 +844,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public V computeIfPresent(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
         if (remappingFunction == null) throw new NullPointerException();
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.computeIfPresent(key, remappingFunction);
         int off = find(t, key, spread(key));
         if (off < 0) return null;
         V old = refAt(t, off + REF_SIZE);
@@ -918,8 +863,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public V compute(K key, BiFunction<? super K, ? super V, ? extends V> remappingFunction) {
         if (remappingFunction == null) throw new NullPointerException();
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.compute(key, remappingFunction);
         long p = spread(key);
         int r = findOrFree(t, key, p);
         V old = r < 0 ? null : refAt(t, r + REF_SIZE);
@@ -939,8 +882,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public V merge(K key, V value, BiFunction<? super V, ? super V, ? extends V> remappingFunction) {
         if (value == null || remappingFunction == null) throw new NullPointerException();
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.merge(key, value, remappingFunction);
         long p = spread(key);
         int r = findOrFree(t, key, p);
         if (r < 0) {
@@ -965,11 +906,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public void forEach(BiConsumer<? super K, ? super V> action) {
         if (action == null) throw new NullPointerException();
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) {
-            o.forEach(action);
-            return;
-        }
         if (size > 0) {
             int mc = modCount;
             int cap = t.capacity;
@@ -987,11 +923,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public void replaceAll(BiFunction<? super K, ? super V, ? extends V> function) {
         if (function == null) throw new NullPointerException();
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) {
-            o.replaceAll(function);
-            return;
-        }
         if (size > 0) {
             int mc = modCount;
             int cap = t.capacity;
@@ -1008,8 +939,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     @Override
     public boolean replace(K key, V oldValue, V newValue) {
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.replace(key, oldValue, newValue);
         int off = find(t, key, spread(key));
         if (off < 0) return false;
         Object v = refAt(t, off + REF_SIZE);
@@ -1023,8 +952,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     @Override
     public V replace(K key, V value) {
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.replace(key, value);
         int off = find(t, key, spread(key));
         if (off < 0) return null;
         V old = refAt(t, off + REF_SIZE);
@@ -1038,18 +965,13 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     @Override
     int capacity() {
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.capacity();
         return t.capacity == 0 ? 16 : t.capacity;
     }
 
     /** The load factor requested at construction (serial form of HashMap and HashSet). */
     @Override
     float loadFactor() {
-        Object a = buf.aux;
-        if (a instanceof Float f) return f;
-        if (a instanceof HashMap<?,?> o) return o.loadFactor();
-        return DEFAULT_LOAD_FACTOR;
+        return buf.aux instanceof Float f ? f : DEFAULT_LOAD_FACTOR;
     }
 
     @Override
@@ -1065,14 +987,12 @@ final class SwissTable<K,V> extends HashMap<K,V> {
 
     @Override
     <T> T[] keysToArray(T[] a) {
-        HashMap<K,V> o = overflow(buf);
-        return o != null ? o.keysToArray(a) : slotsToArray(a, 0);
+        return slotsToArray(a, 0);
     }
 
     @Override
     <T> T[] valuesToArray(T[] a) {
-        HashMap<K,V> o = overflow(buf);
-        return o != null ? o.valuesToArray(a) : slotsToArray(a, 1);
+        return slotsToArray(a, 1);
     }
 
     private <T> T[] slotsToArray(T[] a, int which) {
@@ -1121,8 +1041,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         public boolean contains(Object o) { return containsKey(o); }
         public boolean remove(Object key) {
             SwissTableBuffer t = buf;
-            HashMap<K,V> o = overflow(t);
-            if (o != null) return o.keySet().remove(key);
             int off = find(t, key, spread(key));
             if (off < 0) return false;
             eraseAt(t, off);
@@ -1131,17 +1049,11 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         public Object[] toArray() { return keysToArray(new Object[SwissTable.this.size()]); }
         public <T> T[] toArray(T[] a) { return keysToArray(prepareArray(a)); }
         public Spliterator<K> spliterator() {
-            HashMap<K,V> o = overflow(buf);
-            return o != null ? o.keySet().spliterator() : new SlotSpliterator<>(buf, KEYS, 0, -1, 0, 0);
+            return new SlotSpliterator<>(buf, KEYS, 0, -1, 0, 0);
         }
         public void forEach(Consumer<? super K> action) {
             if (action == null) throw new NullPointerException();
             SwissTableBuffer t = buf;
-            HashMap<K,V> o = overflow(t);
-            if (o != null) {
-                o.keySet().forEach(action);
-                return;
-            }
             if (size > 0) {
                 int mc = modCount;
                 int cap = t.capacity;
@@ -1163,17 +1075,11 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         public Object[] toArray() { return valuesToArray(new Object[SwissTable.this.size()]); }
         public <T> T[] toArray(T[] a) { return valuesToArray(prepareArray(a)); }
         public Spliterator<V> spliterator() {
-            HashMap<K,V> o = overflow(buf);
-            return o != null ? o.values().spliterator() : new SlotSpliterator<>(buf, VALUES, 0, -1, 0, 0);
+            return new SlotSpliterator<>(buf, VALUES, 0, -1, 0, 0);
         }
         public void forEach(Consumer<? super V> action) {
             if (action == null) throw new NullPointerException();
             SwissTableBuffer t = buf;
-            HashMap<K,V> o = overflow(t);
-            if (o != null) {
-                o.values().forEach(action);
-                return;
-            }
             if (size > 0) {
                 int mc = modCount;
                 int cap = t.capacity;
@@ -1194,8 +1100,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         public boolean contains(Object o) {
             if (!(o instanceof Map.Entry<?, ?> e)) return false;
             SwissTableBuffer t = buf;
-            HashMap<K,V> d = overflow(t);
-            if (d != null) return d.entrySet().contains(e);
             Object key = e.getKey();
             int off = find(t, key, spread(key));
             if (off < 0) return false;
@@ -1207,17 +1111,11 @@ final class SwissTable<K,V> extends HashMap<K,V> {
             return SwissTable.this.remove(e.getKey(), e.getValue());
         }
         public Spliterator<Map.Entry<K,V>> spliterator() {
-            HashMap<K,V> o = overflow(buf);
-            return o != null ? o.entrySet().spliterator() : new SlotSpliterator<>(buf, ENTRIES, 0, -1, 0, 0);
+            return new SlotSpliterator<>(buf, ENTRIES, 0, -1, 0, 0);
         }
         public void forEach(Consumer<? super Map.Entry<K,V>> action) {
             if (action == null) throw new NullPointerException();
             SwissTableBuffer t = buf;
-            HashMap<K,V> o = overflow(t);
-            if (o != null) {
-                o.entrySet().forEach(action);
-                return;
-            }
             if (size > 0) {
                 int mc = modCount;
                 for (int g = 0, groups = t.capacity >>> 3; g < groups; g++) {
@@ -1280,30 +1178,20 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     }
 
     /**
-     * Walks the full slots of the table current at creation, group by group; after a collision
-     * flood, the delegate's view instead, through {@code flood}. The views create their iterators
-     * at a single allocation site either way, which lets C2 scalar-replace an iterator that does
-     * not escape (JDK 21 escape analysis gives up on allocations merged with other objects).
+     * Walks the full slots of the table current at creation, group by group.
      * Like hashbrown's RawIter, it counts the slots still to return: hasNext() is a counter test,
      * and the walk stops at the last full slot instead of scanning the empty groups after it.
      */
     abstract class SlotIterator<E> implements Iterator<E> {
         final SwissTableBuffer table = buf;
-        /** The delegate view's iterator after a collision flood, else null. */
-        final Iterator<E> flood;
         final int cap = table.capacity;
         private int g = -1;                             // group of bits
         private long bits;                              // full lanes of group g not returned yet
-        private int remaining = size;                   // full slots not returned yet; 0 when degraded
+        private int remaining = size;                   // full slots not returned yet
         private int current = -1;                       // key offset of the last slot returned
         private int expectedModCount = modCount;
 
-        SlotIterator(int which) {
-            HashMap<K,V> o = overflow(table);
-            flood = o == null ? null : floodIterator(o, which);
-        }
-
-        public final boolean hasNext() { return flood == null ? remaining != 0 : flood.hasNext(); }
+        public final boolean hasNext() { return remaining != 0; }
 
         /** Key offset of the next full slot (its value is at + REF_SIZE). */
         final int nextOff() {
@@ -1322,10 +1210,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         }
 
         public final void remove() {
-            if (flood != null) {
-                flood.remove();
-                return;
-            }
             int off = current;
             if (off < 0) throw new IllegalStateException();
             if (modCount != expectedModCount) throw new ConcurrentModificationException();
@@ -1335,32 +1219,21 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         }
     }
 
-    /** The iterator of view {@code which} of a flood delegate. */
-    @SuppressWarnings("unchecked")
-    private static <E> Iterator<E> floodIterator(HashMap<?,?> o, int which) {
-        return (Iterator<E>) (which == KEYS ? o.keySet() : which == VALUES ? o.values() : o.entrySet()).iterator();
-    }
 
     final class KeyIterator extends SlotIterator<K> {
-        KeyIterator() { super(KEYS); }
         public K next() {
-            if (flood != null) return flood.next();
             return refAt(table, nextOff());
         }
     }
 
     final class ValueIterator extends SlotIterator<V> {
-        ValueIterator() { super(VALUES); }
         public V next() {
-            if (flood != null) return flood.next();
             return refAt(table, nextOff() + REF_SIZE);
         }
     }
 
     final class EntryIterator extends SlotIterator<Map.Entry<K,V>> {
-        EntryIterator() { super(ENTRIES); }
         public Map.Entry<K,V> next() {
-            if (flood != null) return flood.next();
             return new SlotEntry(table, slotOf(cap, nextOff()));
         }
     }
@@ -1448,13 +1321,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public Object clone() {
         SwissTable<K,V> result = new SwissTable<>();
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) {
-            SwissTableBuffer holder = SwissTableBuffer.allocate(0);
-            holder.aux = o.clone();
-            result.buf = holder;
-            return result;
-        }
         int cap = t.capacity;
         if (cap == 0) {
             result.buf = t;                               // unallocated tables are never written
@@ -1480,8 +1346,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     @Override
     public int hashCode() {
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) return o.hashCode();
         int h = 0;
         int cap = t.capacity;
         for (int g = 0, groups = cap >>> 3; g < groups; g++) {
@@ -1497,8 +1361,6 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     public boolean equals(Object o) {
         if (o == this) return true;
         SwissTableBuffer t = buf;
-        HashMap<K,V> d = overflow(t);
-        if (d != null) return d.equals(o);
         if (!(o instanceof Map<?, ?> m) || m.size() != size) return false;
         int cap = t.capacity;
         try {
@@ -1519,23 +1381,75 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         return true;
     }
 
-    /** HashMap.writeObject: the threshold a node-based map of this capacity would carry. */
-    @Override
-    int thresholdForSerialization() {
-        HashMap<K,V> o = overflow(buf);
-        if (o != null) return o.thresholdForSerialization();
-        return (int) Math.min((float) capacity() * loadFactor(), Integer.MAX_VALUE);
+    // ---- serialization -------------------------------------------------------------------------
+    // HashMap's serial form, written and read here: java.io calls these methods for a SwissTable
+    // in place of HashMap's (whose class descriptor the stream names), and allocates a SwissTable
+    // for a HashMap in the stream. The serial fields go through putFields/readFields, by name: the
+    // descriptor's field offsets are HashMap's, which this class does not have.
+
+    /**
+     * HashMap.writeObject: the serial fields threshold (what a node-based map with this bucket
+     * count carries; readers ignore it) and loadFactor, the bucket count, the size, then the mappings.
+     */
+    @java.io.Serial
+    private void writeObject(ObjectOutputStream s) throws IOException {
+        int buckets = capacity();
+        float lf = loadFactor();
+        ObjectOutputStream.PutField fields = s.putFields();
+        fields.put("threshold", (int) Math.min((float) buckets * lf, Integer.MAX_VALUE));
+        fields.put("loadFactor", lf);
+        s.writeFields();
+        s.writeInt(buckets);
+        s.writeInt(size());
+        internalWriteEntries(s);
+    }
+
+    /**
+     * HashMap.readObject: the same checks, and the same array-size check against the stream's
+     * filter (with the bucket count HashMap would allocate), then a table for the mappings.
+     */
+    @java.io.Serial
+    private void readObject(ObjectInputStream s) throws IOException, ClassNotFoundException {
+        ObjectInputStream.GetField fields = s.readFields();
+
+        // Read loadFactor (ignore threshold)
+        float lf = fields.get("loadFactor", 0.75f);
+        if (lf <= 0 || Float.isNaN(lf))
+            throw new InvalidObjectException("Illegal load factor: " + lf);
+        lf = Math.clamp(lf, 0.25f, 4.0f);
+
+        buf = emptyTable(lf);
+        size = 0;
+        modCount = 0;
+
+        s.readInt();                // Read and ignore number of buckets
+        int mappings = s.readInt(); // Read number of mappings (size)
+        if (mappings < 0) {
+            throw new InvalidObjectException("Illegal mappings count: " + mappings);
+        } else if (mappings > 0) {
+            double dc = Math.ceil(mappings / (double)lf);
+            int nodeCap = ((dc < DEFAULT_INITIAL_CAPACITY) ?
+                           DEFAULT_INITIAL_CAPACITY :
+                           (dc >= MAXIMUM_CAPACITY) ?
+                           MAXIMUM_CAPACITY :
+                           tableSizeFor((int)dc));
+            SharedSecrets.getJavaObjectInputStreamAccess().checkArray(s, Map.Entry[].class, nodeCap);
+            buf = newTable(capacityFor(mappings), buf.aux);
+
+            for (int i = 0; i < mappings; i++) {
+                @SuppressWarnings("unchecked")
+                    K key = (K) s.readObject();
+                @SuppressWarnings("unchecked")
+                    V value = (V) s.readObject();
+                put(key, value);
+            }
+        }
     }
 
     /** HashMap.writeObject: the mappings, in iteration order. */
     @Override
     void internalWriteEntries(ObjectOutputStream s) throws IOException {
         SwissTableBuffer t = buf;
-        HashMap<K,V> o = overflow(t);
-        if (o != null) {
-            o.internalWriteEntries(s);
-            return;
-        }
         int cap = t.capacity;
         long refs = refs(cap);
         for (int g = 0, groups = cap >>> 3; g < groups; g++) {
@@ -1547,20 +1461,4 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         }
     }
 
-    /** HashMap.readObject: size the table for the mappings that follow. */
-    @Override
-    void initForDeserialization(ObjectInputStream s, int capacity, int mappings, float lf) throws IOException {
-        buf = emptyTable(lf);
-        if (mappings > 0) {
-            int cap = capacityFor(mappings);
-            SharedSecrets.getJavaObjectInputStreamAccess().checkArray(s, Map.Entry[].class, cap);
-            buf = newTable(cap, buf.aux);
-        }
-    }
-
-    /** HashMap.readObject: one mapping. */
-    @Override
-    void putForDeserialization(K key, V value) {
-        put(key, value);
-    }
 }

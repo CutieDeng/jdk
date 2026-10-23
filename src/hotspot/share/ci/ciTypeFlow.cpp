@@ -773,6 +773,13 @@ void ciTypeFlow::StateVector::do_new(ciBytecodeStream* str) {
   if (!will_link || str->is_unresolved_klass()) {
     trap(str, klass, str->get_klass_index());
   } else {
+    if (UseSwissTable) {
+      // the class Parse::do_new allocates (the native representation of HashMap where redirected)
+      ciInstanceKlass* native = CURRENT_ENV->native_collection_representation(klass, outer()->method()->holder());
+      if (native != nullptr) {
+        klass = native;
+      }
+    }
     push_object(klass);
   }
 }

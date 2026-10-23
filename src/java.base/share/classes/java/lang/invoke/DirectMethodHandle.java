@@ -140,7 +140,29 @@ sealed class DirectMethodHandle extends MethodHandle {
         LambdaForm lform = preparedLambdaForm(ctor);
         MemberName init = ctor.asSpecial();
         assert(init.getMethodType().returnType() == void.class);
+        if (instanceClass == java.util.HashMap.class) {
+            // -XX:+UseSwissTable: like `new HashMap(...)` in bytecode, a handle that constructs
+            // exactly HashMap allocates java.util.SwissTable and runs its constructor with the same
+            // parameters; no HashMap constructor runs on a SwissTable. The handle's type and member
+            // stay HashMap's.
+            MemberName swiss = swissTableConstructor(init.getMethodType());
+            if (swiss != null) {
+                init = swiss;
+                instanceClass = swiss.getDeclaringClass();
+            }
+        }
         return new Constructor(mtype, lform, ctor, true, init, instanceClass);
+    }
+
+    /** SwissTable's constructor of the given type, as invokespecial, under -XX:+UseSwissTable; else null. */
+    private static MemberName swissTableConstructor(MethodType type) {
+        Class<?> swiss = jdk.internal.util.NativeCollections.swissTableClass();
+        if (swiss == null) {
+            return null;
+        }
+        MemberName ctor = new MemberName(swiss, "<init>", type, REF_newInvokeSpecial);
+        ctor = IMPL_NAMES.resolveOrNull(REF_newInvokeSpecial, ctor, null, LM_TRUSTED);
+        return ctor == null ? null : ctor.asSpecial();
     }
 
     @Override

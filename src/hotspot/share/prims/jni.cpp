@@ -980,6 +980,23 @@ JNI_ENTRY(jobject, jni_AllocObject(JNIEnv *env, jclass clazz))
   return ret;
 JNI_END
 
+// The receiver NewObject* allocates for clazz and the constructor methodID. UseSwissTable:
+// exactly HashMap with one of its constructors (native code is not HashMap code) gives SwissTable
+// and its constructor with the same descriptor, as `new HashMap(...)` in bytecode does.
+static instanceOop alloc_object_for_constructor(jclass clazz, jmethodID& methodID, TRAPS) {
+  oop mirror = JNIHandles::resolve_non_null(clazz);
+  if (UseSwissTable && java_lang_Class::as_Klass(mirror) == vmClasses::HashMap_klass()) {
+    Method* target = InstanceKlass::swiss_table_call_target(Method::resolve_jmethod_id(methodID), nullptr, true);
+    if (target != nullptr) {
+      InstanceKlass* swiss = target->method_holder();
+      swiss->initialize(CHECK_NULL);
+      methodID = target->jmethod_id();
+      return swiss->allocate_instance(THREAD);
+    }
+  }
+  return InstanceKlass::allocate_instance(mirror, THREAD);
+}
+
 DT_RETURN_MARK_DECL(NewObjectA, jobject
                     , HOTSPOT_JNI_NEWOBJECTA_RETURN(_ret_ref));
 
@@ -989,7 +1006,7 @@ JNI_ENTRY(jobject, jni_NewObjectA(JNIEnv *env, jclass clazz, jmethodID methodID,
   jobject obj = nullptr;
   DT_RETURN_MARK(NewObjectA, jobject, (const jobject&)obj);
 
-  instanceOop i = InstanceKlass::allocate_instance(JNIHandles::resolve_non_null(clazz), CHECK_NULL);
+  instanceOop i = alloc_object_for_constructor(clazz, methodID, CHECK_NULL);
   obj = JNIHandles::make_local(THREAD, i);
   JavaValue jvalue(T_VOID);
   JNI_ArgumentPusherArray ap(methodID, args);
@@ -1007,7 +1024,7 @@ JNI_ENTRY(jobject, jni_NewObjectV(JNIEnv *env, jclass clazz, jmethodID methodID,
   jobject obj = nullptr;
   DT_RETURN_MARK(NewObjectV, jobject, (const jobject&)obj);
 
-  instanceOop i = InstanceKlass::allocate_instance(JNIHandles::resolve_non_null(clazz), CHECK_NULL);
+  instanceOop i = alloc_object_for_constructor(clazz, methodID, CHECK_NULL);
   obj = JNIHandles::make_local(THREAD, i);
   JavaValue jvalue(T_VOID);
   JNI_ArgumentPusherVaArg ap(methodID, args);
@@ -1025,7 +1042,7 @@ JNI_ENTRY(jobject, jni_NewObject(JNIEnv *env, jclass clazz, jmethodID methodID, 
   jobject obj = nullptr;
   DT_RETURN_MARK(NewObject, jobject, (const jobject&)obj);
 
-  instanceOop i = InstanceKlass::allocate_instance(JNIHandles::resolve_non_null(clazz), CHECK_NULL);
+  instanceOop i = alloc_object_for_constructor(clazz, methodID, CHECK_NULL);
   obj = JNIHandles::make_local(THREAD, i);
   va_list args;
   va_start(args, methodID);

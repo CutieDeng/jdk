@@ -3672,25 +3672,6 @@ Node* GraphKit::new_instance(Node* klass_node,
                              Node* extra_slow_test,
                              Node* *return_size_val,
                              bool deoptimize_on_exception) {
-  // UseSwissTable: an allocation of exactly HashMap produces the native
-  // representation. With a constant class whose native representation is initialized, allocate
-  // the native class here. Otherwise the base class's slow-path bit sends the allocation to the
-  // runtime, which redirects, so the result must not be typed as exactly the base class.
-  bool native_in_runtime = false;
-  if (UseSwissTable) {
-    const TypeKlassPtr* tk = _gvn.type(klass_node)->isa_klassptr();
-    if (tk != nullptr && tk->klass_is_exact() && tk->isa_instklassptr() != nullptr) {
-      ciInstanceKlass* k = tk->is_instklassptr()->exact_klass()->as_instance_klass();
-      ciInstanceKlass* native = C->env()->native_collection_representation(k);
-      if (native != nullptr) {
-        if (native->is_initialized()) {
-          klass_node = makecon(TypeKlassPtr::make(native));
-        } else {
-          native_in_runtime = true;
-        }
-      }
-    }
-  }
   // Compute size in doublewords
   // The size is always an integral number of doublewords, represented
   // as a positive bytewise size stored in the klass's layout_helper.
@@ -3744,9 +3725,6 @@ Node* GraphKit::new_instance(Node* klass_node,
   const TypeKlassPtr* tklass = _gvn.type(klass_node)->isa_klassptr();
   if (!tklass)  tklass = TypeInstKlassPtr::OBJECT;
   const TypeOopPtr* oop_type = tklass->as_instance_type();
-  if (native_in_runtime) {
-    oop_type = oop_type->cast_to_exactness(false);
-  }
 
   // Now generate allocation code
 

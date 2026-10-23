@@ -62,6 +62,7 @@ import jdk.internal.reflect.ReflectionFactory;
 import jdk.internal.access.SharedSecrets;
 import jdk.internal.access.JavaSecurityAccess;
 import jdk.internal.util.ByteArray;
+import jdk.internal.util.NativeCollections;
 import sun.reflect.misc.ReflectUtil;
 
 /**
@@ -211,6 +212,17 @@ public final class ObjectStreamClass implements Serializable {
     private Method writeObjectMethod;
     /** class-defined readObject method, or null if none */
     private Method readObjectMethod;
+    /**
+     * Descriptor of java.util.HashMap under -XX:+UseSwissTable only: java.util.SwissTable, the
+     * serialization constructor that allocates one, and its writeObject/readObject, which write and
+     * read HashMap's serial form and run for SwissTable objects in place of HashMap's. Null otherwise.
+     * The two methods are called through method handles, which check the receiver's class with
+     * isInstance: Method.invoke checks getClass(), and a SwissTable's getClass() reports HashMap.
+     */
+    private Class<?> swissClass;
+    private Constructor<?> swissCons;
+    private MethodHandle swissWriteObject;
+    private MethodHandle swissReadObject;
     /** class-defined readObjectNoData method, or null if none */
     private Method readObjectNoDataMethod;
     /** class-defined writeReplace method, or null if none */
@@ -420,6 +432,15 @@ public final class ObjectStreamClass implements Serializable {
                         readObjectNoDataMethod = getPrivateMethod(
                             cl, "readObjectNoData", null, Void.TYPE);
                         hasWriteObjectData = (writeObjectMethod != null);
+                        if (cl == java.util.HashMap.class) {
+                            Class<?> swiss = NativeCollections.swissTableClass();
+                            if (swiss != null) {
+                                swissClass = swiss;
+                                swissCons = getSerializableConstructor(swiss);
+                                swissWriteObject = swissSerialMethod(swiss, "writeObject", ObjectOutputStream.class);
+                                swissReadObject = swissSerialMethod(swiss, "readObject", ObjectInputStream.class);
+                            }
+                        }
                     }
                     domains = getProtectionDomains(cons, cl);
                     writeReplaceMethod = getInheritableMethod(
@@ -644,6 +665,10 @@ public final class ObjectStreamClass implements Serializable {
             deserializationCtrs = localDesc.deserializationCtrs;
             writeObjectMethod = localDesc.writeObjectMethod;
             readObjectMethod = localDesc.readObjectMethod;
+            swissClass = localDesc.swissClass;
+            swissCons = localDesc.swissCons;
+            swissWriteObject = localDesc.swissWriteObject;
+            swissReadObject = localDesc.swissReadObject;
             readObjectNoDataMethod = localDesc.readObjectNoDataMethod;
             writeReplaceMethod = localDesc.writeReplaceMethod;
             readResolveMethod = localDesc.readResolveMethod;
@@ -1014,6 +1039,8 @@ public final class ObjectStreamClass implements Serializable {
     {
         requireInitialized();
         if (cons != null) {
+            // a HashMap in the stream materializes as a SwissTable under -XX:+UseSwissTable
+            Constructor<?> cons = swissCons != null ? swissCons : this.cons;
             try {
                 if (domains == null || domains.length == 0) {
                     return cons.newInstance();
@@ -1067,6 +1094,14 @@ public final class ObjectStreamClass implements Serializable {
         throws IOException, UnsupportedOperationException
     {
         requireInitialized();
+        if (swissClass != null && swissClass.isInstance(obj)) {
+            try {
+                invokeSwissSerialMethod(swissWriteObject, obj, out);
+            } catch (ClassNotFoundException ex) {
+                throw new InternalError(ex);        // writeObject declares none
+            }
+            return;
+        }
         if (writeObjectMethod != null) {
             try {
                 writeObjectMethod.invoke(obj, new Object[]{ out });
@@ -1097,6 +1132,10 @@ public final class ObjectStreamClass implements Serializable {
                UnsupportedOperationException
     {
         requireInitialized();
+        if (swissClass != null && swissClass.isInstance(obj)) {
+            invokeSwissSerialMethod(swissReadObject, obj, in);
+            return;
+        }
         if (readObjectMethod != null) {
             try {
                 readObjectMethod.invoke(obj, new Object[]{ in });
@@ -1510,6 +1549,36 @@ public final class ObjectStreamClass implements Serializable {
             return (cl == defCl) ? meth : null;
         } else {
             return packageEquals(cl, defCl) ? meth : null;
+        }
+    }
+
+    /**
+     * -XX:+UseSwissTable: the private writeObject or readObject of java.util.SwissTable as a method
+     * handle of type (Object, Object)void.
+     */
+    private static MethodHandle swissSerialMethod(Class<?> swiss, String name, Class<?> stream) {
+        Method m = getPrivateMethod(swiss, name, new Class<?>[] { stream }, Void.TYPE);
+        if (m == null) {
+            throw new InternalError(swiss.getName() + " has no " + name);
+        }
+        try {
+            return MethodHandles.lookup().unreflect(m)
+                    .asType(MethodType.methodType(void.class, Object.class, Object.class));
+        } catch (IllegalAccessException e) {
+            throw new InternalError(e);
+        }
+    }
+
+    /** Calls SwissTable's writeObject or readObject; exceptions propagate as they would from HashMap's. */
+    private static void invokeSwissSerialMethod(MethodHandle mh, Object obj, Object stream)
+        throws IOException, ClassNotFoundException
+    {
+        try {
+            mh.invokeExact(obj, stream);
+        } catch (IOException | ClassNotFoundException | RuntimeException | Error e) {
+            throw e;
+        } catch (Throwable t) {
+            throw new InternalError(t);
         }
     }
 

@@ -1670,6 +1670,15 @@ void LinkResolver::resolve_invoke(CallInfo& result, Handle& recv,
 void LinkResolver::resolve_invokestatic(CallInfo& result, const constantPoolHandle& pool, int index, TRAPS) {
   LinkInfo link_info(pool, index, Bytecodes::_invokestatic, CHECK);
   resolve_static_call(result, link_info, /*initialize_class*/true, CHECK);
+  if (UseSwissTable) {
+    // HashMap.newHashMap called outside HashMap and its subclasses: SwissTable.newHashMap
+    Method* target = InstanceKlass::swiss_table_call_target(result.resolved_method(), pool->pool_holder(), false);
+    if (target != nullptr) {
+      InstanceKlass* holder = target->method_holder();
+      holder->initialize(CHECK);
+      result.set_static(holder, methodHandle(THREAD, target), CHECK);
+    }
+  }
 }
 
 
@@ -1677,6 +1686,15 @@ void LinkResolver::resolve_invokespecial(CallInfo& result, Handle recv,
                                          const constantPoolHandle& pool, int index, TRAPS) {
   LinkInfo link_info(pool, index, Bytecodes::_invokespecial, CHECK);
   resolve_special_call(result, recv, link_info, CHECK);
+  // UseSwissTable: a HashMap constructor called where allocations of exactly HashMap produce
+  // SwissTable (the receiver is one, see InterpreterRuntime::_new and the compilers' allocation)
+  // runs SwissTable's constructor with the same descriptor. super() in SwissTable's constructors
+  // runs AbstractMap(), with or without the flag. Access was checked against the HashMap
+  // constructor, the call site's symbolic reference.
+  Method* target = InstanceKlass::swiss_table_call_target(result.resolved_method(), pool->pool_holder(), true);
+  if (target != nullptr) {
+    result.set_static(target->method_holder(), methodHandle(THREAD, target), CHECK);
+  }
 }
 
 

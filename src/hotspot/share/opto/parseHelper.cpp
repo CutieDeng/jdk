@@ -247,6 +247,23 @@ void Parse::do_new() {
   ciInstanceKlass* klass = iter().get_klass(will_link)->as_instance_klass();
   assert(will_link, "_new: typeflow responsibility");
 
+  if (UseSwissTable && !iter().is_unresolved_klass()) {
+    // An allocation of exactly HashMap requested outside HashMap and its subclasses produces the
+    // native representation, whose constructor the following constructor call binds to (ciEnv
+    // looks it up as LinkResolver does; ciTypeFlow types the new object the same way). Until the
+    // interpreter has initialized the native class, let it allocate.
+    ciInstanceKlass* native = C->env()->native_collection_representation(klass, method()->holder());
+    if (native != nullptr) {
+      if (!native->is_initialized()) {
+        uncommon_trap(Deoptimization::Reason_uninitialized,
+                      Deoptimization::Action_reinterpret,
+                      native);
+        return;
+      }
+      klass = native;
+    }
+  }
+
   // Should throw an InstantiationError?
   if (klass->is_abstract() || klass->is_interface() ||
       klass->name() == ciSymbols::java_lang_Class() ||
