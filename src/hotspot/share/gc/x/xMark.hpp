@@ -64,6 +64,7 @@ private:
   void follow_partial_array(XMarkStackEntry entry, bool finalizable);
   void follow_array_object(objArrayOop obj, bool finalizable);
   void follow_object(oop obj, bool finalizable);
+  void follow_swiss_table_buffer(oop obj, bool finalizable);
   void mark_and_follow(XMarkContext* context, XMarkStackEntry entry);
 
   template <typename T> bool drain(XMarkContext* context, T* timeout);

@@ -41,6 +41,7 @@
 #include "gc/shared/stringdedup/stringDedup.hpp"
 #include "oops/access.inline.hpp"
 #include "oops/compressedOops.inline.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "utilities/debug.hpp"
 
@@ -118,12 +119,41 @@ void G1FullGCMarker::follow_array_chunk(objArrayOop array, int index) {
   array->oop_iterate_range(mark_closure(), beg_index, end_index);
 }
 
+// A java.util.SwissTableBuffer: the instance part now, the trailing references in chunks of
+// ObjArrayMarkingStride, like an object array's elements.
+inline void G1FullGCMarker::follow_swiss_table_buffer(oop obj) {
+  InstanceSwissTableBufferKlass::oop_iterate_instance(obj, mark_closure());
+  if (InstanceSwissTableBufferKlass::ref_count(obj) > 0) {
+    push_objarray(obj, 0);
+  }
+}
+
+inline void G1FullGCMarker::follow_swiss_table_buffer_chunk(oop obj, int index) {
+  const int len = InstanceSwissTableBufferKlass::ref_count(obj);
+  const int end_index = index + MIN2(len - index, (int) ObjArrayMarkingStride);
+  // Push the continuation first to allow more efficient work stealing.
+  if (end_index < len) {
+    push_objarray(obj, end_index);
+  }
+  InstanceSwissTableBufferKlass::oop_iterate_refs(obj, mark_closure(), index, end_index);
+}
+
+inline void G1FullGCMarker::follow_chunk(ObjArrayTask& task) {
+  if (task.obj()->is_objArray()) {
+    follow_array_chunk(objArrayOop(task.obj()), task.index());
+  } else {
+    follow_swiss_table_buffer_chunk(task.obj(), task.index());
+  }
+}
+
 inline void G1FullGCMarker::follow_object(oop obj) {
   assert(_bitmap->is_marked(obj), "should be marked");
   if (obj->is_objArray()) {
     // Handle object arrays explicitly to allow them to
     // be split into chunks if needed.
     follow_array((objArrayOop)obj);
+  } else if (obj->klass()->is_swiss_table_buffer_instance_klass()) {
+    follow_swiss_table_buffer(obj);
   } else {
     obj->oop_iterate(mark_closure());
   }
@@ -163,7 +193,7 @@ void G1FullGCMarker::follow_marking_stacks() {
     ObjArrayTask task;
     if (publish_or_pop_objarray_tasks(task) ||
         _objarray_stack.pop_local(task)) {
-      follow_array_chunk(objArrayOop(task.obj()), task.index());
+      follow_chunk(task);
     }
   } while (!is_empty());
 }

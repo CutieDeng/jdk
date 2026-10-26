@@ -54,6 +54,7 @@
 #include "logging/log.hpp"
 #include "memory/iterator.inline.hpp"
 #include "oops/objArrayOop.inline.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/continuation.hpp"
@@ -286,6 +287,25 @@ void XMark::follow_array_object(objArrayOop obj, bool finalizable) {
   follow_array(addr, size, finalizable);
 }
 
+// A java.util.SwissTableBuffer: the instance part (metadata, the declared reference field), then the
+// trailing references like an array's elements (split into partial arrays when large).
+void XMark::follow_swiss_table_buffer(oop obj, bool finalizable) {
+  if (finalizable) {
+    XMarkBarrierOopClosure<true /* finalizable */> cl;
+    InstanceSwissTableBufferKlass::oop_iterate_instance(obj, &cl);
+  } else {
+    XMarkBarrierOopClosure<false /* finalizable */> cl;
+    InstanceSwissTableBufferKlass::oop_iterate_instance(obj, &cl);
+  }
+
+  InstanceSwissTableBufferKlass* const k = InstanceSwissTableBufferKlass::cast(obj->klass());
+  const uintptr_t addr = (uintptr_t)k->refs_begin<oop>(obj);
+  const size_t size = (size_t)InstanceSwissTableBufferKlass::ref_count(obj) * oopSize;
+  if (size > 0) {
+    follow_array(addr, size, finalizable);
+  }
+}
+
 void XMark::follow_object(oop obj, bool finalizable) {
   if (ContinuationGCSupport::relativize_stack_chunk(obj)) {
     // Loom doesn't support mixing of finalizable marking and strong marking of
@@ -363,6 +383,8 @@ void XMark::mark_and_follow(XMarkContext* context, XMarkStackEntry entry) {
   if (follow) {
     if (is_array(addr)) {
       follow_array_object(objArrayOop(XOop::from_address(addr)), finalizable);
+    } else if (XOop::from_address(addr)->klass()->is_swiss_table_buffer_instance_klass()) {
+      follow_swiss_table_buffer(XOop::from_address(addr), finalizable);
     } else {
       const oop obj = XOop::from_address(addr);
       follow_object(obj, finalizable);

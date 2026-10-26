@@ -232,7 +232,7 @@ void CardTableRS::verify_space(Space* s, HeapWord* gen_boundary) {
       if (boundary_block < boundary) {
         if (s->block_is_obj(boundary_block) && s->obj_is_alive(boundary_block)) {
           oop boundary_obj = cast_to_oop(boundary_block);
-          if (!boundary_obj->is_objArray() &&
+          if (!boundary_obj->is_marked_precisely() &&
               !boundary_obj->is_typeArray()) {
             guarantee(cur_entry > byte_for(used.start()),
                       "else boundary would be boundary_block");

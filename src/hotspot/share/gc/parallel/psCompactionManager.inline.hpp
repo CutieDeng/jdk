@@ -27,6 +27,8 @@
 
 #include "gc/parallel/psCompactionManager.hpp"
 
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
+
 #include "classfile/classLoaderData.hpp"
 #include "classfile/javaClasses.inline.hpp"
 #include "gc/parallel/parMarkBitMap.hpp"
@@ -155,6 +157,25 @@ inline void ParCompactionManager::follow_array(objArrayOop obj, int index) {
   }
 }
 
+// A chunk of the trailing references of a java.util.SwissTableBuffer, like follow_array.
+inline void ParCompactionManager::follow_swiss_table_buffer(oop obj, int index) {
+  const int len = InstanceSwissTableBufferKlass::ref_count(obj);
+  const int end_index = index + MIN2(len - index, (int) ObjArrayMarkingStride);
+  if (end_index < len) {
+    push_objarray(obj, end_index); // Push the continuation.
+  }
+  PCIterateMarkAndPushClosure cl(this, PSParallelCompact::ref_processor());
+  InstanceSwissTableBufferKlass::oop_iterate_refs(obj, &cl, index, end_index);
+}
+
+inline void ParCompactionManager::follow_chunk(ObjArrayTask& task) {
+  if (task.obj()->is_objArray()) {
+    follow_array(objArrayOop(task.obj()), task.index());
+  } else {
+    follow_swiss_table_buffer(task.obj(), task.index());
+  }
+}
+
 inline void ParCompactionManager::update_contents(oop obj) {
   if (!obj->klass()->is_typeArray_klass()) {
     PCAdjustPointerClosure apc(this);
@@ -169,6 +190,11 @@ inline void ParCompactionManager::follow_contents(oop obj) {
   if (obj->is_objArray()) {
     cl.do_klass(obj->klass());
     follow_array(objArrayOop(obj), 0);
+  } else if (obj->klass()->is_swiss_table_buffer_instance_klass()) {
+    InstanceSwissTableBufferKlass::oop_iterate_instance(obj, &cl);
+    if (InstanceSwissTableBufferKlass::ref_count(obj) > 0) {
+      follow_swiss_table_buffer(obj, 0);
+    }
   } else {
     obj->oop_iterate(&cl);
   }

@@ -104,6 +104,15 @@ public:
   template <typename T> inline T* refs_begin(oop obj) const;
   template <typename T> inline T* refs_end(oop obj) const;
 
+  // Chunked marking (the full collections, which split object arrays into ObjArrayTasks): the
+  // trailing references by index, like the elements of an object array; the instance part (the
+  // metadata and the declared reference field) separately, once.
+  static int ref_count(oop obj) { return 2 * capacity(obj); }
+  template <class OopClosureType>
+  static inline void oop_iterate_refs(oop obj, OopClosureType* cl, int start, int end);
+  template <class OopClosureType>
+  static inline void oop_iterate_instance(oop obj, OopClosureType* cl);
+
   // Oop fields (and metadata) iterators: the declared reference field, then the trailing references.
 
   // Forward iteration

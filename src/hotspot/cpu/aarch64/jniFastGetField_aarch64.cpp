@@ -25,9 +25,11 @@
 
 #include "precompiled.hpp"
 #include "asm/macroAssembler.hpp"
+#include "classfile/vmClasses.hpp"
 #include "gc/shared/barrierSet.hpp"
 #include "gc/shared/barrierSetAssembler.hpp"
 #include "memory/resourceArea.hpp"
+#include "oops/compressedOops.inline.hpp"
 #include "prims/jniFastGetField.hpp"
 #include "prims/jvm_misc.hpp"
 #include "prims/jvmtiExport.hpp"
@@ -152,6 +154,23 @@ address JNI_FastGetField::generate_fast_get_int_field0(BasicType type) {
   // Both robj and rscratch1 are clobbered by try_resolve_jobject_in_native.
   BarrierSetAssembler* bs = BarrierSet::barrier_set()->barrier_set_assembler();
   bs->try_resolve_jobject_in_native(masm, c_rarg0, robj, rscratch1, slow);
+
+  if (UseSwissTable) {
+    // A java.util.SwissTable (the native HashMap) has none of HashMap's fields, and a jfieldID is
+    // only an offset: its reads take the slow case, which checks the field (jni.cpp). The flag is
+    // final when the accessors are generated, and then SwissTable is loaded. 4 instructions.
+    Klass* swiss = vmClasses::SwissTable_klass();
+    if (UseCompressedClassPointers) {
+      __ ldrw(roffset, Address(robj, oopDesc::klass_offset_in_bytes()));
+      __ movw(result, (uint32_t) CompressedKlassPointers::encode_not_null(swiss));
+      __ cmpw(roffset, result);
+    } else {
+      __ ldr(roffset, Address(robj, oopDesc::klass_offset_in_bytes()));
+      __ mov(result, (uint64_t) swiss);
+      __ cmp(roffset, result);
+    }
+    __ br(Assembler::EQ, slow);
+  }
 
   __ lsr(roffset, c_rarg2, 2);                // offset
   __ add(result, robj, roffset);

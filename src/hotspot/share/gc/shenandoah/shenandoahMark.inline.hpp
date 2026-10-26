@@ -37,6 +37,7 @@
 #include "gc/shenandoah/shenandoahUtils.hpp"
 #include "memory/iterator.inline.hpp"
 #include "oops/compressedOops.inline.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "runtime/prefetch.inline.hpp"
 #include "utilities/devirtualizer.inline.hpp"
@@ -69,7 +70,10 @@ void ShenandoahMark::do_task(ShenandoahObjToScanQueue* q, T* cl, ShenandoahLiveD
   cl->set_weak(weak);
 
   if (task->is_not_chunked()) {
-    if (obj->is_instance()) {
+    if (obj->klass()->is_swiss_table_buffer_instance_klass()) {
+      // Case 0: java.util.SwissTableBuffer: its trailing references in chunks, like an array's elements.
+      do_chunked_array_start<T>(q, cl, obj, weak);
+    } else if (obj->is_instance()) {
       // Case 1: Normal oop, process as usual.
       if (ContinuationGCSupport::relativize_stack_chunk(obj)) {
           // Loom doesn't support mixing of weak marking and strong marking of
@@ -132,20 +136,40 @@ inline void ShenandoahMark::count_liveness(ShenandoahLiveData* live_data, oop ob
   }
 }
 
+// The chunked part of obj: the elements of an object array, or the trailing references of a
+// java.util.SwissTableBuffer.
+static inline int chunked_length(oop obj) {
+  return obj->is_objArray() ? objArrayOop(obj)->length() : InstanceSwissTableBufferKlass::ref_count(obj);
+}
+
+template <class T>
+static inline void chunked_iterate(oop obj, T* cl, int from, int to) {
+  if (obj->is_objArray()) {
+    objArrayOop(obj)->oop_iterate_range(cl, from, to);
+  } else {
+    InstanceSwissTableBufferKlass::oop_iterate_refs(obj, cl, from, to);
+  }
+}
+
 template <class T>
 inline void ShenandoahMark::do_chunked_array_start(ShenandoahObjToScanQueue* q, T* cl, oop obj, bool weak) {
-  assert(obj->is_objArray(), "expect object array");
-  objArrayOop array = objArrayOop(obj);
-  int len = array->length();
+  assert(obj->is_objArray() || obj->klass()->is_swiss_table_buffer_instance_klass(), "expect object array or SwissTableBuffer");
+  oop array = obj;
+  int len = chunked_length(obj);
 
-  // Mark objArray klass metadata
-  if (Devirtualizer::do_metadata(cl)) {
-    Devirtualizer::do_klass(cl, array->klass());
+  if (obj->is_objArray()) {
+    // Mark objArray klass metadata
+    if (Devirtualizer::do_metadata(cl)) {
+      Devirtualizer::do_klass(cl, obj->klass());
+    }
+  } else {
+    // The SwissTableBuffer's metadata and declared reference field
+    InstanceSwissTableBufferKlass::oop_iterate_instance(obj, cl);
   }
 
   if (len <= (int) ObjArrayMarkingStride*2) {
     // A few slices only, process directly
-    array->oop_iterate_range(cl, 0, len);
+    chunked_iterate(obj, cl, 0, len);
   } else {
     int bits = log2i_graceful(len);
     // Compensate for non-power-of-two arrays, cover the array in excess:
@@ -194,15 +218,15 @@ inline void ShenandoahMark::do_chunked_array_start(ShenandoahObjToScanQueue* q, 
     // Process the irregular tail, if present
     int from = last_idx;
     if (from < len) {
-      array->oop_iterate_range(cl, from, len);
+      chunked_iterate(obj, cl, from, len);
     }
   }
 }
 
 template <class T>
 inline void ShenandoahMark::do_chunked_array(ShenandoahObjToScanQueue* q, T* cl, oop obj, int chunk, int pow, bool weak) {
-  assert(obj->is_objArray(), "expect object array");
-  objArrayOop array = objArrayOop(obj);
+  assert(obj->is_objArray() || obj->klass()->is_swiss_table_buffer_instance_klass(), "expect object array or SwissTableBuffer");
+  oop array = obj;
 
   assert (ObjArrayMarkingStride > 0, "sanity");
 
@@ -221,12 +245,12 @@ inline void ShenandoahMark::do_chunked_array(ShenandoahObjToScanQueue* q, T* cl,
   int to = chunk * chunk_size;
 
 #ifdef ASSERT
-  int len = array->length();
+  int len = chunked_length(obj);
   assert (0 <= from && from < len, "from is sane: %d/%d", from, len);
   assert (0 < to && to <= len, "to is sane: %d/%d", to, len);
 #endif
 
-  array->oop_iterate_range(cl, from, to);
+  chunked_iterate(obj, cl, from, to);
 }
 
 class ShenandoahSATBBufferClosure : public SATBBufferClosure {

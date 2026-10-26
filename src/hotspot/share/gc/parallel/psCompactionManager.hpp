@@ -184,6 +184,9 @@ class ParCompactionManager : public CHeapObj<mtGC> {
 
   void follow_contents(oop obj);
   void follow_array(objArrayOop array, int index);
+  void follow_swiss_table_buffer(oop obj, int index);
+  // An ObjArrayTask: a chunk of an object array or of a SwissTableBuffer's references.
+  void follow_chunk(ObjArrayTask& task);
 
   void update_contents(oop obj);
 

@@ -23,6 +23,7 @@
  */
 
 #include "precompiled.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "gc/shared/taskqueue.hpp"
 #include "oops/oop.inline.hpp"
 #include "logging/log.hpp"
@@ -118,7 +119,10 @@ void TaskQueueStats::verify() const
 
 #ifdef ASSERT
 bool ObjArrayTask::is_valid() const {
-  return _obj != nullptr && _obj->is_objArray() && _index >= 0 &&
-      _index < objArrayOop(_obj)->length();
+  if (_obj == nullptr || _index < 0) return false;
+  if (_obj->is_objArray()) return _index < objArrayOop(_obj)->length();
+  // the trailing references of a java.util.SwissTableBuffer, chunked like an array's elements
+  return _obj->klass()->is_swiss_table_buffer_instance_klass() &&
+      _index < InstanceSwissTableBufferKlass::ref_count(_obj);
 }
 #endif // ASSERT

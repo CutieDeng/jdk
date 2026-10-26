@@ -78,6 +78,10 @@ class G1FullGCMarker : public CHeapObj<mtGC> {
   inline void follow_object(oop obj);
   inline void follow_array(objArrayOop array);
   inline void follow_array_chunk(objArrayOop array, int index);
+  inline void follow_swiss_table_buffer(oop obj);
+  inline void follow_swiss_table_buffer_chunk(oop obj, int index);
+  // An ObjArrayTask: a chunk of an object array or of a SwissTableBuffer's references.
+  inline void follow_chunk(ObjArrayTask& task);
 
   inline void publish_and_drain_oop_tasks();
   // Try to publish all contents from the objArray task queue overflow stack to

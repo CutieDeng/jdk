@@ -62,6 +62,15 @@ public final class NativeCollections {
         return SWISS_TABLE;
     }
 
+    /**
+     * Whether c is java.util.SwissTable itself (flag on or off). It is serialized as HashMap only:
+     * java.io refuses a descriptor of the class itself, so no stream materializes one through
+     * HashMap's serialization methods.
+     */
+    public static boolean isNativeHashMapClass(Class<?> c) {
+        return c != null && c == NATIVE_HASH_MAP;
+    }
+
     /** Whether accessors of this field need {@link #checkReceiver}. */
     public static boolean isGuardedField(Class<?> declaringClass, boolean isStatic) {
         return !isStatic

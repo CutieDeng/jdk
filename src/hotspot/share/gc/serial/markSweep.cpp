@@ -23,6 +23,7 @@
  */
 
 #include "precompiled.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "compiler/compileBroker.hpp"
 #include "gc/serial/markSweep.inline.hpp"
 #include "gc/shared/collectedHeap.inline.hpp"
@@ -86,8 +87,28 @@ void MarkSweep::follow_object(oop obj) {
     // Handle object arrays explicitly to allow them to
     // be split into chunks if needed.
     MarkSweep::follow_array((objArrayOop)obj);
+  } else if (obj->klass()->is_swiss_table_buffer_instance_klass()) {
+    MarkSweep::follow_swiss_table_buffer(obj);
   } else {
     obj->oop_iterate(&mark_and_push_closure);
+  }
+}
+
+// A java.util.SwissTableBuffer: the instance part now, the trailing references in chunks of
+// ObjArrayMarkingStride, like an object array's elements.
+void MarkSweep::follow_swiss_table_buffer(oop obj) {
+  InstanceSwissTableBufferKlass::oop_iterate_instance(obj, &mark_and_push_closure);
+  if (InstanceSwissTableBufferKlass::ref_count(obj) > 0) {
+    MarkSweep::push_objarray(obj, 0);
+  }
+}
+
+void MarkSweep::follow_swiss_table_buffer_chunk(oop obj, int index) {
+  const int len = InstanceSwissTableBufferKlass::ref_count(obj);
+  const int end_index = index + MIN2(len - index, (int) ObjArrayMarkingStride);
+  InstanceSwissTableBufferKlass::oop_iterate_refs(obj, &mark_and_push_closure, index, end_index);
+  if (end_index < len) {
+    MarkSweep::push_objarray(obj, end_index); // Push the continuation.
   }
 }
 
@@ -116,7 +137,11 @@ void MarkSweep::follow_stack() {
     // Process ObjArrays one at a time to avoid marking stack bloat.
     if (!_objarray_stack.is_empty()) {
       ObjArrayTask task = _objarray_stack.pop();
-      follow_array_chunk(objArrayOop(task.obj()), task.index());
+      if (task.obj()->is_objArray()) {
+        follow_array_chunk(objArrayOop(task.obj()), task.index());
+      } else {
+        follow_swiss_table_buffer_chunk(task.obj(), task.index());
+      }
     }
   } while (!_marking_stack.is_empty() || !_objarray_stack.is_empty());
 }

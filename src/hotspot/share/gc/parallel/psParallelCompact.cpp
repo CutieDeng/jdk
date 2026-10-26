@@ -1947,7 +1947,7 @@ void steal_marking_work(TaskTerminator& terminator, uint worker_id) {
     oop obj = nullptr;
     ObjArrayTask task;
     if (ParCompactionManager::steal_objarray(worker_id,  task)) {
-      cm->follow_array((objArrayOop)task.obj(), task.index());
+      cm->follow_chunk(task);
     } else if (ParCompactionManager::steal(worker_id, obj)) {
       cm->follow_contents(obj);
     }

@@ -31,8 +31,12 @@
 #include "oops/oopsHierarchy.hpp"
 #include "gc/shared/gc_globals.hpp"
 
+// Object arrays and java.util.SwissTableBuffers (their trailing references) are scanned in slices
+// of ObjArrayMarkingStride words: their bounded iteration clips the references to a slice.
 inline bool G1CMObjArrayProcessor::should_be_sliced(oop obj) {
-  return obj->is_objArray() && ((objArrayOop)obj)->size() >= 2 * ObjArrayMarkingStride;
+  Klass* k = obj->klass();
+  return (k->is_objArray_klass() || k->is_swiss_table_buffer_instance_klass()) &&
+         obj->size_given_klass(k) >= 2 * ObjArrayMarkingStride;
 }
 
 #endif // SHARE_GC_G1_G1CONCURRENTMARKOBJARRAYPROCESSOR_INLINE_HPP

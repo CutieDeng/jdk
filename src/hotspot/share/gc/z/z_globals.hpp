@@ -65,6 +65,12 @@
   product(bool, ZVerifyRemembered, trueInDebug, DIAGNOSTIC,                 \
           "Verify remembered sets")                                         \
                                                                             \
+  product(uintx, ZMarkSwissSplitLength, 32768, DIAGNOSTIC,                  \
+          "Elements per piece when marking through the references of a "    \
+          "SwissTableBuffer on a large page (rounded up to a multiple of "  \
+          "512)")                                                           \
+          range(1, 1 << 29)                                                 \
+                                                                            \
   develop(bool, ZVerifyOops, false,                                         \
           "Verify accessed oops")                                           \
                                                                             \

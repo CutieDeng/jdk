@@ -163,6 +163,8 @@ class MarkSweep : AllStatic {
   static void follow_array(objArrayOop array);
 
   static void follow_array_chunk(objArrayOop array, int index);
+  static void follow_swiss_table_buffer(oop obj);
+  static void follow_swiss_table_buffer_chunk(oop obj, int index);
 };
 
 class MarkAndPushClosure: public ClaimMetadataVisitingOopIterateClosure {

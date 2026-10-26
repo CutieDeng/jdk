@@ -179,7 +179,7 @@ inline void G1CMTask::process_grey_task_entry(G1TaskQueueEntry task_entry) {
   check_limits();
 }
 
-inline size_t G1CMTask::scan_objArray(objArrayOop obj, MemRegion mr) {
+inline size_t G1CMTask::scan_objArray(oop obj, MemRegion mr) {
   obj->oop_iterate(_cm_oop_closure, mr);
   return mr.word_size();
 }

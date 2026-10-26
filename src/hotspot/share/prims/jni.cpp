@@ -3490,9 +3490,10 @@ void copy_jni_function_table(const struct JNINativeInterface_ *new_jni_NativeInt
 }
 
 void quicken_jni_functions() {
-  // Replace Get<Primitive>Field with fast versions. Not with UseSwissTable: the fast
-  // versions read at the field offset without the check that a native HashMap has the field.
-  if (UseFastJNIAccessors && !VerifyJNIFields && !CheckJNICalls && !UseSwissTable) {
+  // Replace Get<Primitive>Field with fast versions. With UseSwissTable only where the fast
+  // versions send a native HashMap (java.util.SwissTable) to the slow case, which checks that it
+  // has the field (aarch64); elsewhere they would read at the offset without that check.
+  if (UseFastJNIAccessors && !VerifyJNIFields && !CheckJNICalls && (!UseSwissTable || AARCH64_ONLY(true) NOT_AARCH64(false))) {
     address func;
     func = JNI_FastGetField::generate_fast_get_boolean_field();
     if (func != (address)-1) {

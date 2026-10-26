@@ -241,7 +241,7 @@ void PSCardTable::process_range(Func&& object_start,
       assert(obj_addr < addr_r, "inv");
 
       oop obj = cast_to_oop(obj_addr);
-      const bool is_obj_array = obj->is_objArray();
+      const bool is_obj_array = obj->is_marked_precisely();   // object arrays and SwissTableBuffers
       HeapWord* const obj_end_addr = obj_addr + obj->size();
 
       if (is_obj_array) {

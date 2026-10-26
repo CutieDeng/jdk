@@ -58,6 +58,7 @@
 #include "logging/log.hpp"
 #include "memory/iterator.inline.hpp"
 #include "oops/objArrayOop.inline.hpp"
+#include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "runtime/atomic.hpp"
 #include "runtime/continuation.hpp"
@@ -210,17 +211,32 @@ static void mark_barrier_on_oop_array(volatile zpointer* p, size_t length, bool 
   }
 }
 
-void ZMark::follow_array_elements_small(zpointer* addr, size_t length, bool finalizable) {
-  assert(length <= ZMarkPartialArrayMinLength, "Too large, should be split");
+// The piece length for the array elements at addr. The references of a SwissTableBuffer on a large
+// page (its only object) are split into pieces of ZMarkSwissSplitLength elements, rounded up to a
+// multiple of ZMarkPartialArrayMinLength so that the pieces stay aligned for push_partial_array:
+// with 512-element pieces, the many workers marking a large table's (mostly leaf) keys and values
+// spend most of their time in ZMarkTerminate's wake-ups. Object arrays keep 512-element pieces.
+size_t ZMark::split_length_at(zpointer* addr) const {
+  if (UseSwissTable) {
+    const ZPage* const page = _page_table->get(to_zaddress((uintptr_t)addr));
+    if (page->is_large() && to_oop(ZOffset::address(page->start()))->klass()->is_swiss_table_buffer_instance_klass()) {
+      return align_up((size_t)ZMarkSwissSplitLength, ZMarkPartialArrayMinLength);
+    }
+  }
+  return ZMarkPartialArrayMinLength;
+}
+
+void ZMark::follow_array_elements_small(zpointer* addr, size_t length, bool finalizable, size_t split) {
+  assert(length <= split, "Too large, should be split");
 
   log_develop_trace(gc, marking)("Array follow small: " PTR_FORMAT " (" SIZE_FORMAT ")", p2i(addr), length);
 
   mark_barrier_on_oop_array(addr, length, finalizable, _generation->is_young());
 }
 
-void ZMark::follow_array_elements_large(zpointer* addr, size_t length, bool finalizable) {
+void ZMark::follow_array_elements_large(zpointer* addr, size_t length, bool finalizable, size_t split) {
   assert(length <= (size_t)arrayOopDesc::max_array_length(T_OBJECT), "Too large");
-  assert(length > ZMarkPartialArrayMinLength, "Too small, should not be split");
+  assert(length > split, "Too small, should not be split");
 
   zpointer* const start = addr;
   zpointer* const end = start + length;
@@ -229,7 +245,7 @@ void ZMark::follow_array_elements_large(zpointer* addr, size_t length, bool fina
   // should always be greater than the start (hence the +1 below) to make
   // sure we always do some follow work, not just split the array into pieces.
   zpointer* const middle_start = align_up(start + 1, ZMarkPartialArrayMinSize);
-  const size_t    middle_length = align_down(end - middle_start, ZMarkPartialArrayMinLength);
+  const size_t    middle_length = align_down(end - middle_start, split);
   zpointer* const middle_end = middle_start + middle_length;
 
   log_develop_trace(gc, marking)("Array follow large: " PTR_FORMAT "-" PTR_FORMAT" (" SIZE_FORMAT "), "
@@ -247,7 +263,7 @@ void ZMark::follow_array_elements_large(zpointer* addr, size_t length, bool fina
   zpointer* partial_addr = middle_end;
   while (partial_addr > middle_start) {
     const size_t parts = 2;
-    const size_t partial_length = align_up((partial_addr - middle_start) / parts, ZMarkPartialArrayMinLength);
+    const size_t partial_length = align_up((partial_addr - middle_start) / parts, split);
     partial_addr -= partial_length;
     push_partial_array(partial_addr, partial_length, finalizable);
   }
@@ -256,14 +272,14 @@ void ZMark::follow_array_elements_large(zpointer* addr, size_t length, bool fina
   assert(start < middle_start, "Miscalculated middle start");
   zpointer* const leading_addr = start;
   const size_t leading_length = middle_start - start;
-  follow_array_elements_small(leading_addr, leading_length, finalizable);
+  follow_array_elements_small(leading_addr, leading_length, finalizable, split);
 }
 
-void ZMark::follow_array_elements(zpointer* addr, size_t length, bool finalizable) {
-  if (length <= ZMarkPartialArrayMinLength) {
-    follow_array_elements_small(addr, length, finalizable);
+void ZMark::follow_array_elements(zpointer* addr, size_t length, bool finalizable, size_t split) {
+  if (length <= split) {
+    follow_array_elements_small(addr, length, finalizable, split);
   } else {
-    follow_array_elements_large(addr, length, finalizable);
+    follow_array_elements_large(addr, length, finalizable, split);
   }
 }
 
@@ -271,7 +287,7 @@ void ZMark::follow_partial_array(ZMarkStackEntry entry, bool finalizable) {
   zpointer* const addr = decode_partial_array_offset(entry.partial_array_offset());
   const size_t length = entry.partial_array_length();
 
-  follow_array_elements(addr, length, finalizable);
+  follow_array_elements(addr, length, finalizable, split_length_at(addr));
 }
 
 template <bool finalizable, ZGenerationIdOptional generation>
@@ -370,7 +386,32 @@ void ZMark::follow_array_object(objArrayOop obj, bool finalizable) {
   zpointer* const addr = (zpointer*)obj->base();
   const size_t length = (size_t)obj->length();
 
-  follow_array_elements(addr, length, finalizable);
+  follow_array_elements(addr, length, finalizable, ZMarkPartialArrayMinLength);
+}
+
+// A java.util.SwissTableBuffer: the instance part (metadata, the declared reference field) with the
+// closure follow_object would use, then the trailing references like an array's elements (split
+// into partial arrays when large).
+void ZMark::follow_swiss_table_buffer(oop obj, bool finalizable) {
+  if (_generation->is_old()) {
+    if (finalizable) {
+      ZMarkBarrierFollowOopClosure<true /* finalizable */, ZGenerationIdOptional::old> cl;
+      InstanceSwissTableBufferKlass::oop_iterate_instance(obj, &cl);
+    } else {
+      ZMarkBarrierFollowOopClosure<false /* finalizable */, ZGenerationIdOptional::old> cl;
+      InstanceSwissTableBufferKlass::oop_iterate_instance(obj, &cl);
+    }
+  } else {
+    ZMarkBarrierFollowOopClosure<false /* finalizable */, ZGenerationIdOptional::young> cl;
+    InstanceSwissTableBufferKlass::oop_iterate_instance(obj, &cl);
+  }
+
+  InstanceSwissTableBufferKlass* const k = InstanceSwissTableBufferKlass::cast(obj->klass());
+  zpointer* const addr = k->refs_begin<zpointer>(obj);
+  const size_t length = (size_t)InstanceSwissTableBufferKlass::ref_count(obj);
+  if (length > 0) {
+    follow_array_elements(addr, length, finalizable, split_length_at(addr));
+  }
 }
 
 void ZMark::follow_object(oop obj, bool finalizable) {
@@ -453,6 +494,8 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
   if (follow) {
     if (is_array(addr)) {
       follow_array_object(objArrayOop(to_oop(addr)), finalizable);
+    } else if (to_oop(addr)->klass()->is_swiss_table_buffer_instance_klass()) {
+      follow_swiss_table_buffer(to_oop(addr), finalizable);
     } else {
       const oop obj = to_oop(addr);
       follow_object(obj, finalizable);

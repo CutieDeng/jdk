@@ -42,7 +42,7 @@ private:
   void push_array_slice(HeapWord* addr);
 
   // Process (apply the closure) on the given continuation of the given objArray.
-  size_t process_array_slice(objArrayOop const obj, HeapWord* start_from, size_t remaining);
+  size_t process_array_slice(oop const obj, HeapWord* start_from, size_t remaining);
 public:
   static bool should_be_sliced(oop obj);
 

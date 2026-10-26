@@ -33,6 +33,7 @@ import java.io.OptionalDataException;
 import java.io.Serializable;
 import java.lang.invoke.MethodHandle;
 import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Field;
@@ -467,12 +468,36 @@ public class ReflectionFactory {
                 return null;
             }
             meth.setAccessible(true);
-            return MethodHandles.lookup().unreflect(meth);
+            MethodHandle mh = MethodHandles.lookup().unreflect(meth);
+            return cl == java.util.HashMap.class && streamClass != null ? withSwissTable(mh, methodName, streamClass) : mh;
         } catch (NoSuchMethodException ex) {
             return null;
         } catch (IllegalAccessException ex1) {
             throw new InternalError("Error", ex1);
         }
+    }
+
+    /**
+     * -XX:+UseSwissTable: HashMap's writeObject or readObject handle mh for any receiver typed
+     * HashMap, which may be a java.util.SwissTable (getClass() reports HashMap). HashMap's methods
+     * use HashMap's fields, which a SwissTable does not have: a SwissTable receiver goes to
+     * SwissTable's method of the same name, which keeps HashMap's serial form (as in java.io).
+     */
+    private static MethodHandle withSwissTable(MethodHandle mh, String methodName, Class<?> streamClass)
+            throws NoSuchMethodException, IllegalAccessException {
+        Class<?> swiss = jdk.internal.util.NativeCollections.swissTableClass();
+        if (swiss == null) {
+            return mh;
+        }
+        Method sm = swiss.getDeclaredMethod(methodName, streamClass);
+        sm.setAccessible(true);
+        MethodHandles.Lookup l = MethodHandles.lookup();
+        MethodHandle swissMh = MethodHandles.explicitCastArguments(l.unreflect(sm), mh.type());
+        MethodHandle test = l.findVirtual(Class.class, "isInstance", MethodType.methodType(boolean.class, Object.class))
+                .bindTo(swiss);
+        test = MethodHandles.dropArguments(test.asType(MethodType.methodType(boolean.class, mh.type().parameterType(0))),
+                1, mh.type().parameterType(1));
+        return MethodHandles.guardWithTest(test, swissMh, mh);
     }
 
     /**

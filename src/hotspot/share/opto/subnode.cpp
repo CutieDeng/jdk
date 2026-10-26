@@ -1098,6 +1098,31 @@ static inline Node* isa_const_java_mirror(PhaseGVN* phase, Node* n) {
   return phase->makecon(TypeKlassPtr::make(mirror_type->as_klass(), Type::trust_interfaces));
 }
 
+// UseSwissTable: the klass whose mirror getClass() returns selects HashMap for an object of class
+// java.util.SwissTable (LibraryCallKit::native_collection_reported_klass):
+//   CMoveP(Bool(CmpP(k, SwissTable) eq), k, HashMap)
+// Compared with a constant klass c other than these two, the select does not change the result
+// (k == SwissTable gives HashMap != c, and SwissTable != c too): return k, so that the compare is
+// one compare of the loaded klass, the shape instanceof's fast path and the type sharpening after
+// the if (Parse::sharpen_type_after_if) recognize. Null when n is not that select, or c is one of
+// its two classes.
+static Node* skip_reported_klass_select(PhaseGVN* phase, Node* n, const TypeKlassPtr* c) {
+  if (!UseSwissTable || n->Opcode() != Op_CMoveP) return nullptr;
+  Node* bol = n->in(CMoveNode::Condition);
+  if (!bol->is_Bool() || bol->as_Bool()->_test._test != BoolTest::eq) return nullptr;
+  Node* cmp = bol->in(1);
+  Node* k = n->in(CMoveNode::IfFalse);
+  if (cmp->Opcode() != Op_CmpP || cmp->in(1) != k) return nullptr;
+  const TypeKlassPtr* native_t = phase->type(cmp->in(2))->isa_klassptr();
+  const TypeKlassPtr* base_t = phase->type(n->in(CMoveNode::IfTrue))->isa_klassptr();
+  if (native_t == nullptr || base_t == nullptr || !native_t->klass_is_exact() || !base_t->klass_is_exact()) {
+    return nullptr;
+  }
+  ciKlass* ck = c->exact_klass();
+  if (ck == native_t->exact_klass() || ck == base_t->exact_klass()) return nullptr;
+  return k;
+}
+
 //------------------------------Ideal------------------------------------------
 // Normalize comparisons between Java mirror loads to compare the klass instead.
 //
@@ -1136,6 +1161,12 @@ Node *CmpPNode::Ideal( PhaseGVN *phase, bool can_reshape ) {
   const TypeKlassPtr* t2 = phase->type(in(2))->isa_klassptr();
   if (t2 == nullptr || !t2->klass_is_exact())
     return nullptr;
+
+  // getClass() == C.class with UseSwissTable: compare the loaded klass itself.
+  if (Node* k = skip_reported_klass_select(phase, in(1), t2)) {
+    set_req_X(1, k, phase);
+    return this;
+  }
   // Get the constant klass we are comparing to.
   ciKlass* superklass = t2->exact_klass();
 

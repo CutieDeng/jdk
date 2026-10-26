@@ -208,6 +208,10 @@ bool oopDesc::is_stackChunk()  const { return klass()->is_stack_chunk_instance_k
 bool oopDesc::is_array()       const { return klass()->is_array_klass();                }
 bool oopDesc::is_objArray()    const { return klass()->is_objArray_klass();             }
 bool oopDesc::is_typeArray()   const { return klass()->is_typeArray_klass();            }
+bool oopDesc::is_marked_precisely() const {
+  Klass* k = klass();
+  return k->is_objArray_klass() || k->is_swiss_table_buffer_instance_klass();
+}
 
 template<typename T>
 T*       oopDesc::field_addr(int offset)     const { return reinterpret_cast<T*>(cast_from_oop<intptr_t>(as_oop()) + offset); }

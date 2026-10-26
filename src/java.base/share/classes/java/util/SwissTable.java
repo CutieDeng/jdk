@@ -113,6 +113,16 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     static final long GOLDEN = 0x9E3779B97F4A7C15L;
     static final float DEFAULT_LOAD_FACTOR = 0.75f;
 
+    /**
+     * Offset of SwissTableBuffer.aux. Written only through Unsafe (setAux), like the slots: then every
+     * reference store into a table marks the card of the stored-to reference, and the collectors
+     * scan a table's dirty cards only, like an object array's (oopDesc::is_marked_precisely in the
+     * VM); a putfield would mark the card of the object start, which need not hold aux.
+     */
+    private static final long AUX_OFFSET = U.objectFieldOffset(SwissTableBuffer.class, "aux");
+
+    private static void setAux(SwissTableBuffer t, Object aux) { U.putReference(t, AUX_OFFSET, aux); }
+
     /** The table of every empty map with the default load factor; never written. */
     private static final SwissTableBuffer EMPTY_TABLE = SwissTableBuffer.allocate(0);
 
@@ -184,7 +194,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     private static SwissTableBuffer emptyTable(float loadFactor) {
         if (loadFactor == DEFAULT_LOAD_FACTOR) return EMPTY_TABLE;
         SwissTableBuffer t = SwissTableBuffer.allocate(0);
-        t.aux = loadFactor;
+        setAux(t, loadFactor);
         return t;
     }
 
@@ -192,7 +202,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     private static SwissTableBuffer newTable(int capacity, Object aux) {
         SwissTableBuffer t = SwissTableBuffer.allocate(capacity);
         t.growthLeft = growthFor(capacity);
-        t.aux = aux instanceof Float ? aux : null;
+        if (aux instanceof Float) setAux(t, aux);         // a new table's aux is null: no store, no barrier
         return t;
     }
 
@@ -813,9 +823,48 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     private void putAllEntries(Map<? extends K, ? extends V> m) {
         int s = m.size();
         if (s > 0) {
+            if (m instanceof SwissTable<?, ?> st) {
+                putAllFrom(st);
+                return;
+            }
             reserve((int) Math.min((long) size + s, MAX_CAPACITY));
             for (Map.Entry<? extends K, ? extends V> e : m.entrySet())
                 put(e.getKey(), e.getValue());
+        }
+    }
+
+    /**
+     * putAll (and the copy constructor) from another SwissTable: its slots are read directly, with
+     * no entry objects; through entrySet() each mapping cost an entry allocation and the entry's
+     * slot checks. Into an empty map that gets the source's capacity, the source table is copied
+     * as is, with no hash computed; into another empty map the mappings are placed as a rehash
+     * places them, with no lookup (the keys are distinct).
+     */
+    private void putAllFrom(SwissTable<?, ?> src) {
+        SwissTableBuffer from = src.buf;
+        int cap = from.capacity;
+        if (cap == 0) return;
+        SwissTableBuffer t = buf;
+        if (size == 0) {
+            int need = Math.max(t.capacity, capacityFor(src.size));
+            if (need == cap) {
+                buf = copyOf(from, t.aux);
+                size = src.size;
+            } else {
+                SwissTableBuffer n = rehashed(from, need);
+                setAux(n, t.aux);
+                buf = n;
+                size = growthFor(need) - n.growthLeft;
+            }
+            modCount++;
+            return;
+        }
+        reserve((int) Math.min((long) size + src.size, MAX_CAPACITY));
+        for (int g = 0, groups = cap >>> 3; g < groups; g++) {
+            for (long full = matchFull(ctrlWord(from, g)); full != 0; full &= full - 1) {
+                int off = laneOff(cap, g, full);
+                put(refAt(from, off), refAt(from, off + REF_SIZE));
+            }
         }
     }
 
@@ -1289,13 +1338,31 @@ final class SwissTable<K,V> extends HashMap<K,V> {
             return false;
         }
 
+        /**
+         * The full slots of [index, fence) a control word at a time, like forEach: per element only
+         * the lane arithmetic, where tryAdvance (nextFull, element) reloads the word and the capacity.
+         */
+        @SuppressWarnings("unchecked")
         public void forEachRemaining(Consumer<? super T> action) {
             if (action == null) throw new NullPointerException();
             int hi = getFence(), mc = expectedModCount;
             int i = index;
             index = hi;
-            for (i = nextFull(table, i, hi); i < hi; i = nextFull(table, i + 1, hi))
-                action.accept(element(table, which, i));
+            if (i < hi) {
+                SwissTableBuffer t = table;
+                int cap = t.capacity, ref = which == VALUES ? REF_SIZE : 0;
+                int g = i >>> 3, last = (hi - 1) >>> 3;
+                long full = matchFull(ctrlWord(t, g)) & (-1L << ((i & 7) << 3));     // lanes from i
+                for (;;) {
+                    if (g == last && (hi & 7) != 0) full &= (1L << ((hi & 7) << 3)) - 1;  // lanes below hi
+                    for (; full != 0; full &= full - 1) {
+                        int off = laneOff(cap, g, full);
+                        action.accept(which == ENTRIES ? (T) new SlotEntry(t, slotOf(cap, off)) : (T) U.getReference(t, off + ref));
+                    }
+                    if (++g > last) break;
+                    full = matchFull(ctrlWord(t, g));
+                }
+            }
             if (modCount != mc) throw new ConcurrentModificationException();
         }
 
@@ -1326,21 +1393,29 @@ final class SwissTable<K,V> extends HashMap<K,V> {
             result.buf = t;                               // unallocated tables are never written
             return result;
         }
-        SwissTableBuffer c = newTable(cap, t.aux);
+        result.buf = copyOf(t, t.aux);
+        result.size = size;
+        return result;
+    }
+
+    /**
+     * A copy of table t (capacity > 0) with the given aux: the same control words, so the same
+     * slots, tombstones and growth; the references of the full slots (the others are null).
+     */
+    private static SwissTableBuffer copyOf(SwissTableBuffer t, Object aux) {
+        int cap = t.capacity;
+        SwissTableBuffer c = newTable(cap, aux);
         for (int g = 0, groups = cap >>> 3; g < groups; g++) {
-            U.putLong(c, CTRL_BASE + ((long) g << 3), U.getLong(t, CTRL_BASE + ((long) g << 3)));
-        }
-        long refs = refs(cap);
-        for (int i = 0; i < cap; i++) {
-            if (ctrlByte(t, i) < 0) {                     // full
-                U.putReference(c, keyOffset(refs, i), U.getReference(t, keyOffset(refs, i)));
-                U.putReference(c, valueOffset(refs, i), U.getReference(t, valueOffset(refs, i)));
+            long w = ctrlWord(t, g);
+            putCtrlWord(c, g, w);
+            for (long full = matchFull(w); full != 0; full &= full - 1) {
+                int off = laneOff(cap, g, full);
+                U.putReference(c, off, U.getReference(t, off));
+                U.putReference(c, off + REF_SIZE, U.getReference(t, off + REF_SIZE));
             }
         }
         c.growthLeft = t.growthLeft;
-        result.buf = c;
-        result.size = size;
-        return result;
+        return c;
     }
 
     @Override

@@ -210,6 +210,14 @@ void vmClasses::resolve_all(TRAPS) {
     warning("-XX:+UseSwissTable is ignored when dumping a static CDS archive");
     FLAG_SET_ERGO(UseSwissTable, false);
   }
+#if INCLUDE_JVMCI
+  if (UseSwissTable && EnableJVMCI) {
+    // A JVMCI compiler allocates `new HashMap` as written: allocations and the constructor calls
+    // that initialize them would not be redirected together, as the interpreter, C1 and C2 do.
+    warning("-XX:+UseSwissTable is ignored with -XX:+EnableJVMCI");
+    FLAG_SET_ERGO(UseSwissTable, false);
+  }
+#endif
   if (UseSwissTable) {
     // A redirected constructor call needs SwissTable's constructor with the same descriptor.
     ResourceMark rm;

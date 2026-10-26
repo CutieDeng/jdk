@@ -462,6 +462,10 @@ public final class ObjectStreamClass implements Serializable {
             throw new InternalError(ex);
         }
 
+        if (NativeCollections.isNativeHashMapClass(cl)) {
+            // the native representation of HashMap is written and read as HashMap only
+            serializeEx = deserializeEx = new ExceptionInfo(name, "representation of java.util.HashMap, serialized as HashMap");
+        }
         if (deserializeEx == null) {
             if (isEnum) {
                 deserializeEx = new ExceptionInfo(name, "enum type");

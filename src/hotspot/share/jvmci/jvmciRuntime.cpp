@@ -1853,6 +1853,19 @@ void JVMCIRuntime::get_field_by_index(InstanceKlass* accessor, fieldDescriptor& 
 // ------------------------------------------------------------------
 // Perform an appropriate method lookup based on accessor, holder,
 // name, signature, and bytecode.
+// java.util.SwissTable: the target the interpreter binds the call to (InstanceKlass::
+// swiss_table_call_target). UseSwissTable is off with JVMCI, so that is only super() in
+// SwissTable's constructors, which runs AbstractMap(): SwissTable never has HashMap's fields.
+static Method* with_swiss_table_target(Method* m, InstanceKlass* accessor, bool is_special) {
+  if (m != nullptr) {
+    Method* target = InstanceKlass::swiss_table_call_target(m, accessor, is_special);
+    if (target != nullptr) {
+      return target;
+    }
+  }
+  return m;
+}
+
 Method* JVMCIRuntime::lookup_method(InstanceKlass* accessor,
                                     Klass*        holder,
                                     Symbol*       name,
@@ -1868,9 +1881,9 @@ Method* JVMCIRuntime::lookup_method(InstanceKlass* accessor,
                      tag);
   switch (bc) {
     case Bytecodes::_invokestatic:
-      return LinkResolver::resolve_static_call_or_null(link_info);
+      return with_swiss_table_target(LinkResolver::resolve_static_call_or_null(link_info), accessor, false);
     case Bytecodes::_invokespecial:
-      return LinkResolver::resolve_special_call_or_null(link_info);
+      return with_swiss_table_target(LinkResolver::resolve_special_call_or_null(link_info), accessor, true);
     case Bytecodes::_invokeinterface:
       return LinkResolver::linktime_resolve_interface_method_or_null(link_info);
     case Bytecodes::_invokevirtual:

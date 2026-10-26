@@ -72,12 +72,14 @@ private:
 
   bool is_array(zaddress addr) const;
   void push_partial_array(zpointer* addr, size_t length, bool finalizable);
-  void follow_array_elements_small(zpointer* addr, size_t length, bool finalizable);
-  void follow_array_elements_large(zpointer* addr, size_t length, bool finalizable);
-  void follow_array_elements(zpointer* addr, size_t length, bool finalizable);
+  size_t split_length_at(zpointer* addr) const;
+  void follow_array_elements_small(zpointer* addr, size_t length, bool finalizable, size_t split);
+  void follow_array_elements_large(zpointer* addr, size_t length, bool finalizable, size_t split);
+  void follow_array_elements(zpointer* addr, size_t length, bool finalizable, size_t split);
   void follow_partial_array(ZMarkStackEntry entry, bool finalizable);
   void follow_array_object(objArrayOop obj, bool finalizable);
   void follow_object(oop obj, bool finalizable);
+  void follow_swiss_table_buffer(oop obj, bool finalizable);
   void mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry);
 
   bool rebalance_work(ZMarkContext* context);

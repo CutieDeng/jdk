@@ -116,6 +116,11 @@ class oopDesc {
   inline bool is_array()       const;
   inline bool is_objArray()    const;
   inline bool is_typeArray()   const;
+  // Every reference store into the object dirties the card of the stored-to reference, so card
+  // scanning can stay within the dirty cards: object arrays, and java.util.SwissTableBuffer, whose
+  // references (the slots and aux) are all stored through Unsafe, which marks cards precisely in
+  // every barrier (ON_UNKNOWN_OOP_REF), where a putfield marks the card of the object start.
+  inline bool is_marked_precisely() const;
 
   // type test operations that don't require inclusion of oop.inline.hpp.
   bool is_instance_noinline()    const;

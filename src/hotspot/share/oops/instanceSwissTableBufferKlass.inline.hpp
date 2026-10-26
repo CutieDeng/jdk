@@ -76,4 +76,31 @@ void InstanceSwissTableBufferKlass::oop_oop_iterate_bounded(oop obj, OopClosureT
   }
 }
 
+template <class OopClosureType>
+inline void InstanceSwissTableBufferKlass::oop_iterate_refs(oop obj, OopClosureType* cl, int start, int end) {
+  InstanceSwissTableBufferKlass* k = cast(obj->klass());
+  assert(0 <= start && start <= end && end <= ref_count(obj), "bad range [%d, %d)", start, end);
+  if (UseCompressedOops) {
+    narrowOop* const base = k->refs_begin<narrowOop>(obj);
+    for (narrowOop* p = base + start; p < base + end; p++) {
+      Devirtualizer::do_oop(cl, p);
+    }
+  } else {
+    oop* const base = k->refs_begin<oop>(obj);
+    for (oop* p = base + start; p < base + end; p++) {
+      Devirtualizer::do_oop(cl, p);
+    }
+  }
+}
+
+template <class OopClosureType>
+inline void InstanceSwissTableBufferKlass::oop_iterate_instance(oop obj, OopClosureType* cl) {
+  InstanceSwissTableBufferKlass* k = cast(obj->klass());
+  if (UseCompressedOops) {
+    k->InstanceKlass::oop_oop_iterate<narrowOop>(obj, cl);
+  } else {
+    k->InstanceKlass::oop_oop_iterate<oop>(obj, cl);
+  }
+}
+
 #endif // SHARE_OOPS_INSTANCESWISSTABLEBUFFERKLASS_INLINE_HPP

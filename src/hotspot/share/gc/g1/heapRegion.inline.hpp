@@ -369,7 +369,7 @@ HeapWord* HeapRegion::do_oops_on_memregion_in_humongous(MemRegion mr,
   // Only filler objects follow a humongous object in the containing
   // regions, and we can ignore those.  So only process the one
   // humongous object.
-  if (obj->is_objArray() || (sr->bottom() < mr.start())) {
+  if (obj->is_marked_precisely() || (sr->bottom() < mr.start())) {
     // objArrays are always marked precisely, so limit processing
     // with mr.  Non-objArrays might be precisely marked, and since
     // it's humongous it's worthwhile avoiding full processing.
@@ -413,7 +413,7 @@ inline HeapWord* HeapRegion::oops_on_memregion_iterate_in_unparsable(MemRegion m
     cur += obj->size();
     bool is_precise;
 
-    if (!obj->is_objArray() || (cast_from_oop<HeapWord*>(obj) >= start && cur <= end)) {
+    if (!obj->is_marked_precisely() || (cast_from_oop<HeapWord*>(obj) >= start && cur <= end)) {
       obj->oop_iterate(cl);
       is_precise = false;
     } else {
@@ -487,7 +487,7 @@ inline HeapWord* HeapRegion::oops_on_memregion_iterate(MemRegion mr, Closure* cl
     // start, in which case we need to iterate over them in full.
     // objArrays are precisely marked, but can still be iterated
     // over in full if completely covered.
-    if (!obj->is_objArray() || (cast_from_oop<HeapWord*>(obj) >= start && cur <= end)) {
+    if (!obj->is_marked_precisely() || (cast_from_oop<HeapWord*>(obj) >= start && cur <= end)) {
       obj->oop_iterate(cl);
     } else {
       obj->oop_iterate(cl, mr);

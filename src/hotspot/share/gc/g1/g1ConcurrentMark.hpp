@@ -741,7 +741,7 @@ private:
 public:
   // Apply the closure on the given area of the objArray. Return the number of words
   // scanned.
-  inline size_t scan_objArray(objArrayOop obj, MemRegion mr);
+  inline size_t scan_objArray(oop obj, MemRegion mr);   // a slice of an object array or SwissTableBuffer
   // Resets the task; should be called right at the beginning of a marking phase.
   void reset(G1CMBitMap* mark_bitmap);
   // Clears all the fields that correspond to a claimed region.

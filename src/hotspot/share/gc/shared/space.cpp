@@ -49,7 +49,7 @@
 HeapWord* DirtyCardToOopClosure::get_actual_top(HeapWord* top,
                                                 HeapWord* top_obj) {
   if (top_obj != nullptr && top_obj < (_sp->toContiguousSpace())->top()) {
-    if (cast_to_oop(top_obj)->is_objArray() || cast_to_oop(top_obj)->is_typeArray()) {
+    if (cast_to_oop(top_obj)->is_marked_precisely() || cast_to_oop(top_obj)->is_typeArray()) {
       // An arrayOop is starting on the dirty card - since we do exact
       // store checks for objArrays we are done.
     } else {
