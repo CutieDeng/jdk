@@ -41,7 +41,8 @@ import jdk.internal.vm.annotation.IntrinsicCandidate;
  * A list that is its own buffer: one object holds the size, the capacity and the elements, so an
  * element is one reference away from the list instead of two (a list, then its array).
  *
- * <p>The capacity of a list is fixed when it is allocated. An operation that needs more room
+ * <p>The capacity of a list is fixed when it is allocated, and is at least 1: a list without room
+ * would be replaced by its first addition. An operation that needs more room
  * ({@link #add(Object)}, {@link #add(int, Object)}, {@link #addAll(Collection)},
  * {@link #ensureCapacity(int)}) returns a larger list that replaces this one; {@link #trimToSize()}
  * returns a smaller one. Use the returned list:
@@ -75,7 +76,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     private static final Unsafe U = Unsafe.getUnsafe();
     /** log2 of the size of a heap reference. */
     private static final int REF_SHIFT = Unsafe.ARRAY_OBJECT_INDEX_SCALE == 4 ? 2 : 3;
-    /** Capacity of the first larger list that replaces a list of capacity 0. */
+    /** The capacity of a larger list that replaces a list of smaller capacity, at least. */
     private static final int DEFAULT_CAPACITY = 10;
     /** The size of a list that was replaced by another. */
     private static final int REPLACED = -1;
@@ -122,7 +123,8 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     // ---- construction ------------------------------------------------------------------------
 
     /**
-     * Returns an empty list of the given capacity.
+     * Returns an empty list of the given capacity, or of capacity 1 for 0: there are no lists without
+     * room.
      *
      * @param <E> the type of the elements
      * @param capacity the capacity
@@ -135,12 +137,12 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         if (capacity < 0 || capacity > MAX_CAPACITY) {
             throw new IllegalArgumentException("Illegal capacity: " + capacity);
         }
-        return (FastArrayList<E>) allocate(capacity);
+        return (FastArrayList<E>) allocate(Math.max(capacity, 1));
     }
 
     /**
      * Returns a list of the elements of a collection, in the order of its iterator, with as much
-     * capacity as elements.
+     * capacity as elements (at least 1).
      *
      * @param <E> the type of the elements
      * @param c the collection
@@ -247,11 +249,14 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         return replacedBy(n);
     }
 
-    /** A capacity of at least minCapacity, grown like java.util.ArrayList grows its array. */
+    /**
+     * A capacity of at least minCapacity, grown like java.util.ArrayList grows its array: by half,
+     * and to at least DEFAULT_CAPACITY from a smaller capacity (as ArrayList's first growth).
+     */
     private int grownCapacity(int minCapacity) {
         int old = (int) cap;
-        int c = old == 0 ? Math.max(DEFAULT_CAPACITY, minCapacity)
-                         : ArraysSupport.newLength(old, minCapacity - old, old >> 1);
+        int c = old < DEFAULT_CAPACITY ? Math.max(DEFAULT_CAPACITY, minCapacity)
+                                       : ArraysSupport.newLength(old, minCapacity - old, old >> 1);
         if (c > MAX_CAPACITY) {
             if (minCapacity > MAX_CAPACITY) {
                 throw new OutOfMemoryError("Required FastArrayList capacity " + minCapacity + " is too large");
@@ -429,15 +434,15 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     }
 
     /**
-     * Returns this list if its capacity equals its size, else a list of capacity size() with the
-     * elements of this one, which replaces this list.
+     * Returns this list if its capacity equals its size (or is 1 for an empty list), else a list of
+     * capacity size() (at least 1) with the elements of this one, which replaces this list.
      *
      * @return the list to use from now on
      * @throws IllegalStateException if this list was replaced
      */
     public FastArrayList<E> trimToSize() {
-        int s = liveSize();
-        return s == cap ? this : moveTo(s);
+        int c = Math.max(liveSize(), 1);
+        return c == cap ? this : moveTo(c);
     }
 
     // ---- changes in place --------------------------------------------------------------------
