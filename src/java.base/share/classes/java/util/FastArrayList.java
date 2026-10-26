@@ -29,6 +29,8 @@ import java.io.ObjectInputStream;
 import java.io.Serial;
 import java.io.Serializable;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.function.UnaryOperator;
 
 import jdk.internal.misc.Unsafe;
 import jdk.internal.util.ArraysSupport;
@@ -41,19 +43,17 @@ import jdk.internal.vm.annotation.IntrinsicCandidate;
  * A list that is its own buffer: one object holds the size, the capacity and the elements, so an
  * element is one reference away from the list instead of two (a list, then its array).
  *
- * <p>The capacity of a list object is fixed when it is allocated, and is at least 1. When a change
- * needs another capacity ({@link #add(Object)}, {@link #add(int, Object)}, {@link #addAll(Collection)},
- * {@link #ensureCapacity(int)} need more room, {@link #trimToSize()} less), the elements move to a
- * new list object of that capacity, and the list forwards to it: the list keeps its identity, every
- * reference to it stays valid, and it reaches its elements through one more reference. These
- * methods return this list.
+ * <p>A {@link List}: every change works in place. The capacity of a list object is fixed when it
+ * is allocated, and is at least 1. When a change needs another capacity (an addition to a full
+ * list, {@link #ensureCapacity(int)}, {@link #trimToSize()}), the elements move to a new list object
+ * of that capacity, and the list forwards to it: the list keeps its identity, every reference to it
+ * stays valid, and it reaches its elements through one more reference.
  *
- * <p>This class is not a {@link List}. {@link #asList()} returns a {@code List} view.
- *
- * <p>Iterators fail fast: they throw {@link ConcurrentModificationException} when the size changed
- * after they were created, other than through the iterator itself, or the elements moved. Changes
- * that keep the size and the place of the elements ({@link #set}, a removal followed by an addition)
- * are not detected.
+ * <p>There is no modification count. Iterators, list iterators and sublists fail fast: they throw
+ * {@link ConcurrentModificationException} when the size changed after they were created, other
+ * than through them, or the elements moved. Changes that keep the size and the place of the
+ * elements ({@link #set}, {@link #sort}, {@link #replaceAll}, a removal followed by an addition) are
+ * not detected.
  *
  * <p>The class is not synchronized. Unsynchronized concurrent use may lose updates or throw, but
  * never reads or writes outside a list object.
@@ -62,7 +62,7 @@ import jdk.internal.vm.annotation.IntrinsicCandidate;
  *
  * @param <E> the type of the elements
  */
-public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serializable {
+public final class FastArrayList<E> implements List<E>, RandomAccess, Serializable {
     @Serial
     private static final long serialVersionUID = -2393474218547326715L;
 
@@ -328,6 +328,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     /**
      * {@return the number of elements}
      */
+    @Override
     @ForceInline
     public int size() {
         int s = size;
@@ -345,6 +346,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     /**
      * {@return whether this list has no elements}
      */
+    @Override
     @ForceInline
     public boolean isEmpty() {
         return size() == 0;
@@ -357,6 +359,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * @return the element
      * @throws IndexOutOfBoundsException if the index is out of {@code [0, size())}
      */
+    @Override
     public E get(int index) {
         int s = size;
         if (s < 0) {
@@ -383,6 +386,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * @return the element that was at the index
      * @throws IndexOutOfBoundsException if the index is out of {@code [0, size())}
      */
+    @Override
     public E set(int index, E element) {
         int s = size;
         if (s < 0) {
@@ -407,6 +411,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * {@return the index of the first element equal to o, or -1}
      * @param o the element to look for
      */
+    @Override
     public int indexOf(Object o) {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
@@ -419,9 +424,25 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     }
 
     /**
+     * {@return the index of the last element equal to o, or -1}
+     * @param o the element to look for
+     */
+    @Override
+    public int lastIndexOf(Object o) {
+        FastArrayList<E> t = storage();
+        for (int i = sizeOf(t) - 1; i >= 0; i--) {
+            if (Objects.equals(o, t.at(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /**
      * {@return whether this list has an element equal to o}
      * @param o the element to look for
      */
+    @Override
     public boolean contains(Object o) {
         return indexOf(o) >= 0;
     }
@@ -432,21 +453,22 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * Appends an element. If the list is full, its elements move to a larger list object first.
      *
      * @param e the element
-     * @return this list
+     * @return true
      */
-    public FastArrayList<E> add(E e) {
+    @Override
+    public boolean add(E e) {
         int s = size;
         if (s < 0) {                            // forwarding: the sign test first, so that this path
             forwardee().addHere(e, this);       // skips the comparison with the cap of this list
-            return this;
+            return true;
         }
         if (s >= cap) {
             addToLarger(e);
-            return this;
+            return true;
         }
         put(s, e);
         size = s + 1;
-        return this;
+        return true;
     }
 
     /**
@@ -486,10 +508,10 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      *
      * @param index the index, in {@code [0, size()]}
      * @param element the element
-     * @return this list
      * @throws IndexOutOfBoundsException if the index is out of {@code [0, size()]}
      */
-    public FastArrayList<E> add(int index, E element) {
+    @Override
+    public void add(int index, E element) {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
         Objects.checkIndex(index, s + 1);
@@ -504,7 +526,6 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
             n.size = s + 1;
             forwardTo(t, s, n);
         }
-        return this;
     }
 
     /**
@@ -512,15 +533,16 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * elements of the list move to a larger list object.
      *
      * @param c the collection
-     * @return this list
+     * @return whether the collection had an element
      * @throws NullPointerException if the collection is null
      */
-    public FastArrayList<E> addAll(Collection<? extends E> c) {
+    @Override
+    public boolean addAll(Collection<? extends E> c) {
         Object[] a = c.toArray();
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
         if (a.length == 0) {
-            return this;
+            return false;
         }
         if (a.length <= t.cap - s) {
             for (int i = 0; i < a.length; i++) {
@@ -538,7 +560,49 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
             n.size = s + a.length;
             forwardTo(t, s, n);
         }
-        return this;
+        return true;
+    }
+
+    /**
+     * Inserts the elements of a collection at an index, in the order of its iterator, moving the
+     * elements from that index up. If they do not fit, the elements of the list move to a larger list
+     * object.
+     *
+     * @param index the index, in {@code [0, size()]}
+     * @param c the collection
+     * @return whether the collection had an element
+     * @throws IndexOutOfBoundsException if the index is out of {@code [0, size()]}
+     * @throws NullPointerException if the collection is null
+     */
+    @Override
+    public boolean addAll(int index, Collection<? extends E> c) {
+        Object[] a = c.toArray();
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        Objects.checkIndex(index, s + 1);
+        int n = a.length;
+        if (n == 0) {
+            return false;
+        }
+        if (n <= t.cap - s) {
+            copySlots(t, index, t, index + n, s - index);
+            for (int i = 0; i < n; i++) {
+                t.put(index + i, a[i]);
+            }
+            t.size = s + n;
+        } else {
+            if (n > MAX_CAPACITY - s) {
+                throw new OutOfMemoryError("Required FastArrayList capacity " + ((long) s + n) + " is too large");
+            }
+            FastArrayList<E> m = copyOfSlots(t, index, grownCapacity(t.cap, s + n));
+            copySlots(t, index, m, index + n, s - index);
+            for (int i = 0; i < n; i++) {
+                m.put(index + i, a[i]);
+            }
+            m.size = s + n;
+            forwardTo(t, s, m);
+        }
+        return true;
     }
 
     /**
@@ -546,32 +610,27 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * object.
      *
      * @param minCapacity the capacity wanted
-     * @return this list
      */
-    public FastArrayList<E> ensureCapacity(int minCapacity) {
+    public void ensureCapacity(int minCapacity) {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
         if (minCapacity > t.cap) {
             forwardTo(t, s, copyOfSlots(t, s, grownCapacity(t.cap, minCapacity)));
         }
-        return this;
     }
 
     /**
      * Makes the capacity the size (at least 1): if it is not, the elements move to a list object of
      * that capacity. Until a collection folds the list into it, the list object of the old capacity
      * stays too.
-     *
-     * @return this list
      */
-    public FastArrayList<E> trimToSize() {
+    public void trimToSize() {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
         int c = Math.max(s, 1);
         if (c != t.cap) {
             forwardTo(t, s, copyOfSlots(t, s, c));
         }
-        return this;
     }
 
     // ---- changes in place --------------------------------------------------------------------
@@ -583,6 +642,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * @return the element that was removed
      * @throws IndexOutOfBoundsException if the index is out of {@code [0, size())}
      */
+    @Override
     public E remove(int index) {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);                         // read once: every slot written below is under s
@@ -590,10 +650,34 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
             throw outOfBounds(index, s);
         }
         E old = t.at(index);
-        copySlots(t, index + 1, t, index, s - index - 1);
+        fastRemove(t, s, index);
+        return old;
+    }
+
+    /** Removes slot i of storage t, which has s elements (i in [0, s)). */
+    private static void fastRemove(FastArrayList<?> t, int s, int i) {
+        copySlots(t, i + 1, t, i, s - i - 1);
         t.put(s - 1, null);
         t.size = s - 1;
-        return old;
+    }
+
+    /**
+     * Removes the first element equal to o, if there is one.
+     *
+     * @param o the element to remove
+     * @return whether the list had such an element
+     */
+    @Override
+    public boolean remove(Object o) {
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        for (int i = 0; i < s; i++) {
+            if (Objects.equals(o, t.at(i))) {
+                fastRemove(t, s, i);
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -602,6 +686,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * @return the element that was removed
      * @throws NoSuchElementException if this list is empty
      */
+    @Override
     public E removeLast() {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
@@ -617,6 +702,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     /**
      * Removes all elements. The capacity does not change.
      */
+    @Override
     public void clear() {
         int s = size;
         if (s < 0) {
@@ -642,11 +728,185 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         size = 0;
     }
 
+    /**
+     * {@return whether this list has an element equal to every element of a collection}
+     * @param c the collection
+     * @throws NullPointerException if the collection is null
+     */
+    @Override
+    public boolean containsAll(Collection<?> c) {
+        for (Object e : c) {
+            if (!contains(e)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Removes the elements that a collection contains.
+     *
+     * @param c the collection
+     * @return whether an element was removed
+     * @throws NullPointerException if the collection is null
+     */
+    @Override
+    public boolean removeAll(Collection<?> c) {
+        return batchRemove(c, false);
+    }
+
+    /**
+     * Removes the elements that a collection does not contain.
+     *
+     * @param c the collection
+     * @return whether an element was removed
+     * @throws NullPointerException if the collection is null
+     */
+    @Override
+    public boolean retainAll(Collection<?> c) {
+        return batchRemove(c, true);
+    }
+
+    /**
+     * Keeps the elements e with c.contains(e) == keep, in order. If c.contains throws, the elements
+     * it did not look at stay, as with ArrayList.
+     */
+    private boolean batchRemove(Collection<?> c, boolean keep) {
+        Objects.requireNonNull(c);
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        int r = 0, w = 0;
+        try {
+            for (; r < s; r++) {
+                E e = t.at(r);
+                if (c.contains(e) == keep) {
+                    t.put(w++, e);
+                }
+            }
+        } finally {
+            if (r != s) {
+                copySlots(t, r, t, w, s - r);
+                w += s - r;
+            }
+            if (w != s) {
+                for (int i = w; i < s; i++) {
+                    t.put(i, null);
+                }
+                t.size = w;
+            }
+        }
+        return w != s;
+    }
+
+    /**
+     * Removes the elements a predicate holds for. The predicate sees every element before any is
+     * removed; if it throws, the list does not change.
+     *
+     * @param filter the predicate
+     * @return whether an element was removed
+     * @throws NullPointerException if the predicate is null
+     * @throws ConcurrentModificationException if the predicate changes the size of the list or makes
+     *         its elements move
+     */
+    @Override
+    public boolean removeIf(Predicate<? super E> filter) {
+        Objects.requireNonNull(filter);
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        long[] dead = null;
+        for (int i = 0; i < s; i++) {
+            if (filter.test(t.at(i))) {
+                if (dead == null) {
+                    dead = new long[(s + 63) >>> 6];
+                }
+                dead[i >>> 6] |= 1L << i;
+            }
+        }
+        if (t.size != s) {                         // a move marks t FORWARDED
+            throw new ConcurrentModificationException();
+        }
+        if (dead == null) {
+            return false;
+        }
+        int w = 0;
+        for (int r = 0; r < s; r++) {
+            if ((dead[r >>> 6] & (1L << r)) == 0) {
+                t.put(w++, t.at(r));
+            }
+        }
+        for (int i = w; i < s; i++) {
+            t.put(i, null);
+        }
+        t.size = w;
+        return true;
+    }
+
+    /**
+     * Replaces each element with the result of an operator on it.
+     *
+     * @param operator the operator
+     * @throws NullPointerException if the operator is null
+     * @throws ConcurrentModificationException if the operator changes the size of the list or makes
+     *         its elements move
+     */
+    @Override
+    public void replaceAll(UnaryOperator<E> operator) {
+        Objects.requireNonNull(operator);
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        for (int i = 0; i < s && t.size == s; i++) {
+            t.put(i, operator.apply(t.at(i)));
+        }
+        if (t.size != s) {
+            throw new ConcurrentModificationException();
+        }
+    }
+
+    /**
+     * Sorts the elements, by a comparator or, for null, by their natural order (stable).
+     *
+     * @param c the comparator, or null
+     * @throws ClassCastException if elements are not mutually comparable
+     * @throws ConcurrentModificationException if the comparator changes the size of the list or
+     *         makes its elements move
+     */
+    @Override
+    @SuppressWarnings("unchecked")
+    public void sort(Comparator<? super E> c) {
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        Object[] a = new Object[s];
+        for (int i = 0; i < s; i++) {
+            a[i] = t.at(i);
+        }
+        Arrays.sort((E[]) a, c);
+        if (t.size != s) {
+            throw new ConcurrentModificationException();
+        }
+        for (int i = 0; i < s; i++) {
+            t.put(i, a[i]);
+        }
+    }
+
+    /** Removes the elements in [fromIndex, toIndex), moving the later ones down (for sublists). */
+    private void removeRange(int fromIndex, int toIndex) {
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        Objects.checkFromToIndex(fromIndex, toIndex, s);
+        copySlots(t, toIndex, t, fromIndex, s - toIndex);
+        int n = s - (toIndex - fromIndex);
+        for (int i = n; i < s; i++) {
+            t.put(i, null);
+        }
+        t.size = n;
+    }
+
     // ---- bulk reads --------------------------------------------------------------------------
 
     /**
      * {@return an array of the elements, in order}
      */
+    @Override
     public Object[] toArray() {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
@@ -667,6 +927,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * @throws ArrayStoreException if an element is not an instance of the component type of a
      * @throws NullPointerException if a is null
      */
+    @Override
     @SuppressWarnings("unchecked")
     public <T> T[] toArray(T[] a) {
         FastArrayList<E> t = storage();
@@ -717,22 +978,45 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     }
 
     /**
+     * {@return a list iterator over the elements, in order, from the first}
+     */
+    @Override
+    public ListIterator<E> listIterator() {
+        return listIterator(0);
+    }
+
+    /**
+     * Returns a list iterator over the elements, in order, from an index.
+     *
+     * @param index the index of the element that next() returns first, in {@code [0, size()]}
+     * @return a list iterator
+     * @throws IndexOutOfBoundsException if the index is out of {@code [0, size()]}
+     */
+    @Override
+    public ListIterator<E> listIterator(int index) {
+        FastArrayList<E> t = storage();
+        int s = sizeOf(t);
+        Objects.checkIndex(index, s + 1);
+        return new ListItr(t, s, index);
+    }
+
+    /**
      * An iterator over the list object that holds the elements when it is made: this list, or its
      * storage. It fails when the size of that object changes, which a move of the elements does as
      * well (forwardTo marks the object they leave FORWARDED).
      */
-    private final class Itr implements Iterator<E> {
-        private final FastArrayList<E> list;
-        private int cursor;
-        private int lastRet = -1;
-        private int expectedSize;
+    private class Itr implements Iterator<E> {
+        FastArrayList<E> list;
+        int cursor;
+        int lastRet = -1;
+        int expectedSize;
 
         Itr(FastArrayList<E> list, int size) {
             this.list = list;
             expectedSize = size;
         }
 
-        private void checkSize() {
+        final void checkSize() {
             if (list.size != expectedSize) {
                 throw new ConcurrentModificationException();
             }
@@ -768,64 +1052,191 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         }
     }
 
-    // ---- List view ---------------------------------------------------------------------------
-
     /**
-     * Returns a {@link List} view of this list: changes through either show in the other.
-     *
-     * @return a List view
+     * A list iterator: an Itr that can also go back, set and add. An add may move the elements; the
+     * iterator then iterates the list object they moved to.
      */
-    public List<E> asList() {
-        return new ListView<>(this);
-    }
-
-    private static final class ListView<E> extends AbstractList<E> implements RandomAccess {
-        private final FastArrayList<E> list;
-
-        ListView(FastArrayList<E> list) {
-            this.list = list;
+    private final class ListItr extends Itr implements ListIterator<E> {
+        ListItr(FastArrayList<E> list, int size, int index) {
+            super(list, size);
+            cursor = index;
         }
 
-        @Override public E get(int index)               { return list.get(index); }
-        @Override public E set(int index, E element)    { return list.set(index, element); }
-        @Override public int size()                     { return list.size(); }
-        @Override public int indexOf(Object o)          { return list.indexOf(o); }
-        @Override public boolean contains(Object o)     { return list.contains(o); }
-        @Override public Object[] toArray()             { return list.toArray(); }
-        @Override public <T> T[] toArray(T[] a)         { return list.toArray(a); }
+        @Override
+        public boolean hasPrevious() {
+            return cursor != 0;
+        }
 
         @Override
-        public boolean add(E e) {
-            list.add(e);
-            modCount++;
-            return true;
+        public int nextIndex() {
+            return cursor;
+        }
+
+        @Override
+        public int previousIndex() {
+            return cursor - 1;
+        }
+
+        @Override
+        public E previous() {
+            checkSize();
+            int i = cursor - 1;
+            if (i < 0) {
+                throw new NoSuchElementException();
+            }
+            if (i >= expectedSize) {
+                throw new ConcurrentModificationException();
+            }
+            cursor = i;
+            return list.at(lastRet = i);
+        }
+
+        @Override
+        public void set(E e) {
+            if (lastRet < 0) {
+                throw new IllegalStateException();
+            }
+            checkSize();
+            FastArrayList.this.set(lastRet, e);
+        }
+
+        @Override
+        public void add(E e) {
+            checkSize();
+            int i = cursor;
+            FastArrayList.this.add(i, e);
+            cursor = i + 1;
+            lastRet = -1;
+            FastArrayList<E> t = storage();
+            list = t;
+            expectedSize = sizeOf(t);
+        }
+    }
+
+    // ---- sublists ----------------------------------------------------------------------------
+
+    /**
+     * Returns a view of the elements in [fromIndex, toIndex). Changes through the view show in this
+     * list and the other way round; a change of the size of this list other than through the view
+     * makes the view fail (ConcurrentModificationException).
+     *
+     * @param fromIndex the first index, included
+     * @param toIndex the last index, excluded
+     * @return the view
+     * @throws IndexOutOfBoundsException if fromIndex is negative, or toIndex larger than the size
+     * @throws IllegalArgumentException if fromIndex is larger than toIndex
+     */
+    @Override
+    public List<E> subList(int fromIndex, int toIndex) {
+        AbstractList.subListRangeCheck(fromIndex, toIndex, size());
+        return new SubList<>(this, null, fromIndex, toIndex);
+    }
+
+    /**
+     * A view of [offset, offset + size) of root, or of a part of the sublist parent. An AbstractList
+     * (its modification count is the view's own, for its iterators); changes of root not through the
+     * view show as a size of root other than the one the view last saw.
+     */
+    private static final class SubList<E> extends AbstractList<E> implements RandomAccess {
+        private final FastArrayList<E> root;
+        private final SubList<E> parent;
+        private final int offset;
+        private int size;
+        private int expectedRootSize;
+
+        SubList(FastArrayList<E> root, SubList<E> parent, int offset, int toIndex) {
+            this.root = root;
+            this.parent = parent;
+            this.offset = offset;
+            this.size = toIndex - offset;
+            this.expectedRootSize = root.size();
+        }
+
+        private void checkForComodification() {
+            if (root.size() != expectedRootSize) {
+                throw new ConcurrentModificationException();
+            }
+        }
+
+        private void rangeCheckForAdd(int index) {
+            if (index < 0 || index > size) {
+                throw new IndexOutOfBoundsException("Index: " + index + ", Size: " + size);
+            }
+        }
+
+        /** After a change through this view of delta elements: this view and the ones it is part of. */
+        private void updateSize(int delta) {
+            int rs = root.size();
+            for (SubList<E> v = this; v != null; v = v.parent) {
+                v.size += delta;
+                v.expectedRootSize = rs;
+                v.modCount++;
+            }
+        }
+
+        @Override
+        public E get(int index) {
+            Objects.checkIndex(index, size);
+            checkForComodification();
+            return root.get(offset + index);
+        }
+
+        @Override
+        public E set(int index, E element) {
+            Objects.checkIndex(index, size);
+            checkForComodification();
+            return root.set(offset + index, element);
+        }
+
+        @Override
+        public int size() {
+            checkForComodification();
+            return size;
         }
 
         @Override
         public void add(int index, E element) {
-            list.add(index, element);
-            modCount++;
-        }
-
-        @Override
-        public boolean addAll(Collection<? extends E> c) {
-            int s = list.size();
-            list.addAll(c);
-            modCount++;
-            return list.size() != s;
+            rangeCheckForAdd(index);
+            checkForComodification();
+            root.add(offset + index, element);
+            updateSize(1);
         }
 
         @Override
         public E remove(int index) {
-            E e = list.remove(index);
-            modCount++;
+            Objects.checkIndex(index, size);
+            checkForComodification();
+            E e = root.remove(offset + index);
+            updateSize(-1);
             return e;
         }
 
         @Override
-        public void clear() {
-            list.clear();
-            modCount++;
+        protected void removeRange(int fromIndex, int toIndex) {
+            checkForComodification();
+            root.removeRange(offset + fromIndex, offset + toIndex);
+            updateSize(fromIndex - toIndex);
+        }
+
+        @Override
+        public boolean addAll(Collection<? extends E> c) {
+            return addAll(size, c);
+        }
+
+        @Override
+        public boolean addAll(int index, Collection<? extends E> c) {
+            rangeCheckForAdd(index);
+            checkForComodification();
+            int before = root.size();
+            boolean changed = root.addAll(offset + index, c);
+            updateSize(root.size() - before);
+            return changed;
+        }
+
+        @Override
+        public List<E> subList(int fromIndex, int toIndex) {
+            subListRangeCheck(fromIndex, toIndex, size);
+            return new SubList<>(root, this, offset + fromIndex, offset + toIndex);
         }
     }
 
@@ -893,7 +1304,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         StringJoiner j = new StringJoiner(", ", "[", "]");
         for (int i = 0; i < s; i++) {
             Object e = t.at(i);
-            j.add(e == this ? "(this FastArrayList)" : String.valueOf(e));
+            j.add(e == this ? "(this Collection)" : String.valueOf(e));
         }
         return j.toString();
     }
