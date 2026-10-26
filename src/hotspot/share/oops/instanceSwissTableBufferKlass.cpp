@@ -37,8 +37,11 @@
 #include "utilities/ostream.hpp"
 #include "utilities/powerOfTwo.hpp"
 
-int InstanceSwissTableBufferKlass::_capacity_offset = -1;
+InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_swiss     = { -1, false, -1, 1, 2 };
+InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_fast_list = { -1, true,  -1, 0, 1 };
+const Klass* InstanceSwissTableBufferKlass::_fast_list_klass = nullptr;
 int InstanceSwissTableBufferKlass::_aux_offset = -1;
+int InstanceSwissTableBufferKlass::_fast_list_size_offset = -1;
 
 InstanceSwissTableBufferKlass::InstanceSwissTableBufferKlass(const ClassFileParser& parser)
   : InstanceKlass(parser, Kind) {
@@ -48,30 +51,66 @@ InstanceSwissTableBufferKlass::InstanceSwissTableBufferKlass(const ClassFilePars
   set_layout_helper(lh);
 }
 
-void InstanceSwissTableBufferKlass::init_offsets() {
-  InstanceKlass* k = vmClasses::SwissTableBuffer_klass();
+static int local_field_offset(InstanceKlass* k, const char* name, Symbol* signature, const char* what) {
   fieldDescriptor fd;
-  TempNewSymbol name = SymbolTable::new_symbol("capacity");
-  bool found = k->find_local_field(name, vmSymbols::int_signature(), &fd);
-  guarantee(found && !fd.is_static(), "java.util.SwissTableBuffer must declare int capacity");
-  _capacity_offset = fd.offset();
-  TempNewSymbol aux = SymbolTable::new_symbol("aux");
-  found = k->find_local_field(aux, vmSymbols::object_signature(), &fd);
-  guarantee(found && !fd.is_static(), "java.util.SwissTableBuffer must declare Object aux");
-  _aux_offset = fd.offset();
-  guarantee(k->is_swiss_table_buffer_instance_klass(), "java.util.SwissTableBuffer must have InstanceSwissTableBufferKlass");
+  TempNewSymbol sym = SymbolTable::new_symbol(name);
+  const bool found = k->find_local_field(sym, signature, &fd);
+  guarantee(found && !fd.is_static(), "%s", what);
+  return fd.offset();
 }
 
-jint InstanceSwissTableBufferKlass::max_capacity() {
-  // Keep the instance size below 2^31 bytes: 9 bytes per slot with compressed oops, 17 without.
-  return heapOopSize == 4 ? (1 << 27) : (1 << 26);
+void InstanceSwissTableBufferKlass::init_offsets() {
+  InstanceKlass* k = vmClasses::SwissTableBuffer_klass();
+  guarantee(k->is_swiss_table_buffer_instance_klass(), "java.util.SwissTableBuffer must have InstanceSwissTableBufferKlass");
+  _swiss.capacity_offset = local_field_offset(k, "capacity", vmSymbols::int_signature(),
+                                              "java.util.SwissTableBuffer must declare int capacity");
+  _swiss.data_base = cast(k)->ctrl_base_in_bytes();
+  _aux_offset = local_field_offset(k, "aux", vmSymbols::object_signature(),
+                                   "java.util.SwissTableBuffer must declare Object aux");
+
+  InstanceKlass* f = vmClasses::FastArrayList_klass();
+  guarantee(f->is_swiss_table_buffer_instance_klass(), "java.util.FastArrayList must have InstanceSwissTableBufferKlass");
+  _fast_list_size_offset = local_field_offset(f, "size", vmSymbols::int_signature(),
+                                              "java.util.FastArrayList must declare int size");
+  _fast_list.capacity_offset = local_field_offset(f, "cap", vmSymbols::long_signature(),
+                                                  "java.util.FastArrayList must declare long cap");
+  // The elements follow the declared fields. Element 0 must not be adjacent to a field of its own
+  // size (see the class comment): size is an int, cap a long.
+  int base = cast(f)->ctrl_base_in_bytes();
+  if (base == _fast_list_size_offset + BytesPerInt && heapOopSize == BytesPerInt) {
+    base += heapOopSize;
+  }
+  if (base == _fast_list.capacity_offset + BytesPerLong && heapOopSize == BytesPerLong) {
+    base += heapOopSize;
+  }
+  guarantee(is_aligned(base, heapOopSize), "FastArrayList elements must be aligned");
+  _fast_list.data_base = base;
+  _fast_list_klass = f;
+}
+
+jint InstanceSwissTableBufferKlass::max_capacity() const {
+  if (!is_fast_list()) {
+    // Keep the instance size below 2^31 bytes: 9 bytes per slot with compressed oops, 17 without.
+    return heapOopSize == 4 ? (1 << 27) : (1 << 26);
+  }
+  // Keep the instance size below 2^31 bytes, and at most as many elements as an array may have.
+  const jlong by_size = ((jlong)max_jint - _fast_list.data_base - MinObjAlignmentInBytes) / heapOopSize;
+  return (jint)MIN2(by_size, (jlong)max_jint - 8);
+}
+
+bool InstanceSwissTableBufferKlass::is_valid_capacity(jint capacity) const {
+  if (capacity < 0 || capacity > max_capacity()) {
+    return false;
+  }
+  return is_fast_list() || capacity == 0 || (capacity >= 8 && is_power_of_2(capacity));
 }
 
 size_t InstanceSwissTableBufferKlass::instance_size(jint capacity) const {
-  assert(capacity == 0 || (capacity >= 8 && is_power_of_2(capacity)), "invalid capacity %d", capacity);
-  const size_t bytes = (size_t)ctrl_base_in_bytes() + (size_t)capacity * (1 + 2 * (size_t)heapOopSize);
-  assert(is_aligned(bytes, HeapWordSize), "control bytes and references are word aligned");
-  return align_object_size(bytes >> LogHeapWordSize);
+  assert(is_valid_capacity(capacity), "invalid capacity %d", capacity);
+  const Layout& l = layout();
+  const size_t bytes = (size_t)l.data_base +
+                       (size_t)capacity * ((size_t)l.bytes_per_slot + (size_t)l.refs_per_slot * heapOopSize);
+  return align_object_size(align_up(bytes, (size_t)HeapWordSize) >> LogHeapWordSize);
 }
 
 size_t InstanceSwissTableBufferKlass::oop_size(oop obj) const {
@@ -81,21 +120,29 @@ size_t InstanceSwissTableBufferKlass::oop_size(oop obj) const {
 // Writes the capacity before the klass is published: once the klass is non-null, a concurrent
 // collector may parse the object, and its size comes from the capacity.
 class SwissTableBufferAllocator : public MemAllocator {
+  const InstanceSwissTableBufferKlass::Layout& _layout;
   const jint _capacity;
 public:
   SwissTableBufferAllocator(Klass* klass, size_t word_size, jint capacity, Thread* thread)
-    : MemAllocator(klass, word_size, thread), _capacity(capacity) {}
+    : MemAllocator(klass, word_size, thread),
+      _layout(InstanceSwissTableBufferKlass::layout(klass)), _capacity(capacity) {}
 
   virtual oop initialize(HeapWord* mem) const {
-    mem_clear(mem);                                   // control bytes EMPTY (0), references null
-    *(jint*)((address)mem + InstanceSwissTableBufferKlass::capacity_offset()) = _capacity;
+    mem_clear(mem);                                   // primitive bytes 0 (control bytes EMPTY), references null
+    address cap = (address)mem + _layout.capacity_offset;
+    if (_layout.capacity_is_long) {
+      *(jlong*)cap = _capacity;
+    } else {
+      *(jint*)cap = _capacity;
+    }
     return finish(mem);
   }
 };
 
 instanceOop InstanceSwissTableBufferKlass::allocate_table(jint capacity, TRAPS) {
-  if (capacity < 0 || capacity > max_capacity() || (capacity != 0 && (capacity < 8 || !is_power_of_2(capacity)))) {
-    THROW_MSG_NULL(vmSymbols::java_lang_IllegalArgumentException(), "invalid SwissTableBuffer capacity");
+  if (!is_valid_capacity(capacity)) {
+    THROW_MSG_NULL(vmSymbols::java_lang_IllegalArgumentException(),
+                   is_fast_list() ? "invalid FastArrayList capacity" : "invalid SwissTableBuffer capacity");
   }
   assert(is_initialized(), "allocated from Java code of the class");
   SwissTableBufferAllocator allocator(this, instance_size(capacity), capacity, THREAD);
@@ -106,8 +153,10 @@ instanceOop InstanceSwissTableBufferKlass::allocate_table(jint capacity, TRAPS) 
 void InstanceSwissTableBufferKlass::oop_print_on(oop obj, outputStream* st) {
   InstanceKlass::oop_print_on(obj, st);
   const jint cap = capacity(obj);
-  st->print_cr(" - control bytes: %d at offset %d, references: %d at offset %d",
-               cap, ctrl_base_in_bytes(), 2 * cap, ctrl_base_in_bytes() + cap);
+  const Layout& l = layout();
+  st->print_cr(" - capacity %d; primitive bytes: %d at offset %d, references: %d at offset %d",
+               cap, l.bytes_per_slot * cap, l.data_base, l.refs_per_slot * cap,
+               l.data_base + l.bytes_per_slot * cap);
 }
 #endif
 
@@ -124,7 +173,7 @@ JVM_ENTRY(jint, SwissTableBuffer_ctrlBase(JNIEnv* env, jclass cls)) {
 } JVM_END
 
 JVM_ENTRY(jint, SwissTableBuffer_maxCapacity(JNIEnv* env, jclass cls)) {
-  return InstanceSwissTableBufferKlass::max_capacity();
+  return InstanceSwissTableBufferKlass::cast(vmClasses::SwissTableBuffer_klass())->max_capacity();
 } JVM_END
 
 #define CC (char*)
@@ -144,4 +193,39 @@ JVM_ENTRY(void, JVM_RegisterSwissTableBufferMethods(JNIEnv* env, jclass cls)) {
   int ok = env->RegisterNatives(cls, java_util_SwissTableBuffer_methods,
                                 sizeof(java_util_SwissTableBuffer_methods) / sizeof(JNINativeMethod));
   guarantee(ok == 0, "register java.util.SwissTableBuffer natives");
+} JVM_END
+
+// Natives of java.util.FastArrayList, registered by its static initializer.
+
+JVM_ENTRY(jobject, FastArrayList_allocate(JNIEnv* env, jclass cls, jint capacity)) {
+  InstanceSwissTableBufferKlass* k = InstanceSwissTableBufferKlass::cast(vmClasses::FastArrayList_klass());
+  oop obj = k->allocate_table(capacity, CHECK_NULL);
+  return JNIHandles::make_local(THREAD, obj);
+} JVM_END
+
+JVM_ENTRY(jint, FastArrayList_dataBase(JNIEnv* env, jclass cls)) {
+  return InstanceSwissTableBufferKlass::fast_list_layout().data_base;
+} JVM_END
+
+JVM_ENTRY(jint, FastArrayList_maxCapacity(JNIEnv* env, jclass cls)) {
+  return InstanceSwissTableBufferKlass::cast(vmClasses::FastArrayList_klass())->max_capacity();
+} JVM_END
+
+#define CC (char*)
+#define FN_PTR(f) CAST_FROM_FN_PTR(void*, &f)
+
+static JNINativeMethod java_util_FastArrayList_methods[] = {
+  {CC "allocate",    CC "(I)Ljava/util/FastArrayList;", FN_PTR(FastArrayList_allocate)},
+  {CC "dataBase",    CC "()I",                          FN_PTR(FastArrayList_dataBase)},
+  {CC "maxCapacity", CC "()I",                          FN_PTR(FastArrayList_maxCapacity)},
+};
+
+#undef CC
+#undef FN_PTR
+
+JVM_ENTRY(void, JVM_RegisterFastArrayListMethods(JNIEnv* env, jclass cls)) {
+  ThreadToNativeFromVM ttnfv(thread);
+  int ok = env->RegisterNatives(cls, java_util_FastArrayList_methods,
+                                sizeof(java_util_FastArrayList_methods) / sizeof(JNINativeMethod));
+  guarantee(ok == 0, "register java.util.FastArrayList natives");
 } JVM_END

@@ -172,9 +172,11 @@ static inline bool is_stack_chunk_class(const Symbol* class_name,
           loader_data->is_the_null_class_loader_data());
 }
 
+// The classes whose instances have trailing data sized by a capacity (InstanceSwissTableBufferKlass)
 static inline bool is_swiss_table_buffer_class(const Symbol* class_name,
                                         const ClassLoaderData* loader_data) {
-  return (class_name == vmSymbols::java_util_SwissTableBuffer() &&
+  return ((class_name == vmSymbols::java_util_SwissTableBuffer() ||
+           class_name == vmSymbols::java_util_FastArrayList()) &&
           loader_data->is_the_null_class_loader_data());
 }
 
@@ -462,7 +464,7 @@ InstanceKlass* InstanceKlass::allocate_instance_klass(const ClassFileParser& par
     // stack chunk
     ik = new (loader_data, size, THREAD) InstanceStackChunkKlass(parser);
   } else if (is_swiss_table_buffer_class(class_name, loader_data)) {
-    // swiss table storage (variable sized, trailing references)
+    // swiss table storage, or a FastArrayList (variable sized, trailing references)
     ik = new (loader_data, size, THREAD) InstanceSwissTableBufferKlass(parser);
   } else if (is_class_loader(class_name, parser)) {
     // class loader - java.lang.ClassLoader

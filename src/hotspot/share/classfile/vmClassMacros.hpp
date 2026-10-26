@@ -156,6 +156,7 @@
   do_klass(HashMap_klass,                               java_util_HashMap                                     ) \
   do_klass(SwissTable_klass,                            java_util_SwissTable                                  ) \
   do_klass(SwissTableBuffer_klass,                      java_util_SwissTableBuffer                            ) \
+  do_klass(FastArrayList_klass,                         java_util_FastArrayList                               ) \
                                                                                                                 \
   do_klass(StackTraceElement_klass,                     java_lang_StackTraceElement                           ) \
                                                                                                                 \

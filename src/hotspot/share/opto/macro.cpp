@@ -1665,15 +1665,31 @@ PhaseMacroExpand::initialize_object(AllocateNode* alloc,
   rawmem = make_store(control, rawmem, object, oopDesc::klass_offset_in_bytes(), klass_node, T_METADATA);
   int header_size = alloc->minimum_header_size();  // conservatively small
 
-  // A plain (non-array) allocation with a length is a java.util.SwissTableBuffer: 'length' is its capacity.
+  // A plain (non-array) allocation with a length is a variable-sized instance (InstanceSwissTableBufferKlass:
+  // a java.util.SwissTableBuffer or a java.util.FastArrayList): 'length' is its capacity.
   // LibraryCallKit::inline_swiss_table_buffer_allocate stores it into the capacity field with a store the
   // InitializeNode normally captures, which complete_stores() then writes with the other
   // initializing stores. If the store was not captured, write the capacity here, after the body is
   // cleared, so that the object is parsable before it is published.
   const bool swiss_table_buffer = (length != nullptr) && !alloc->is_AllocateArray();
+  int capacity_offset = -1;
+  BasicType capacity_type = T_INT;
+  Node* capacity_value = length;
   bool capacity_stored = false;
+  if (swiss_table_buffer) {
+    const TypeInstKlassPtr* tk = _igvn.type(klass_node)->isa_instklassptr();
+    assert(tk != nullptr && tk->klass_is_exact(), "variable-sized instances are allocated with their exact klass");
+    const bool fast_list = tk->instance_klass() == C->env()->FastArrayList_klass();
+    const InstanceSwissTableBufferKlass::Layout& l =
+        fast_list ? InstanceSwissTableBufferKlass::fast_list_layout() : InstanceSwissTableBufferKlass::swiss_layout();
+    capacity_offset = l.capacity_offset;
+    if (l.capacity_is_long) {
+      capacity_type = T_LONG;
+      capacity_value = transform_later(new ConvI2LNode(length));
+    }
+  }
   if (swiss_table_buffer && init != nullptr && !init->is_complete()) {
-    Node* st = init->find_captured_store(InstanceSwissTableBufferKlass::capacity_offset(), BytesPerInt, &_igvn);
+    Node* st = init->find_captured_store(capacity_offset, type2aelembytes(capacity_type), &_igvn);
     capacity_stored = (st != nullptr) && st->is_Store();
   }
 
@@ -1722,7 +1738,7 @@ PhaseMacroExpand::initialize_object(AllocateNode* alloc,
   }
 
   if (swiss_table_buffer && !capacity_stored) {
-    rawmem = make_store(control, rawmem, object, InstanceSwissTableBufferKlass::capacity_offset(), length, T_INT);
+    rawmem = make_store(control, rawmem, object, capacity_offset, capacity_value, capacity_type);
   }
 
   return rawmem;
@@ -1884,7 +1900,8 @@ Node* PhaseMacroExpand::prefetch_allocation(Node* i_o, Node*& needgc_false,
 void PhaseMacroExpand::expand_allocate(AllocateNode *alloc) {
   Node* capacity = alloc->in(AllocateNode::ALength);
   if (capacity != nullptr && !capacity->is_top()) {
-    // A java.util.SwissTableBuffer (variable-sized instance, see LibraryCallKit::inline_swiss_table_buffer_allocate):
+    // A java.util.SwissTableBuffer or java.util.FastArrayList (variable-sized instance, see
+    // LibraryCallKit::inline_swiss_table_buffer_allocate):
     // the capacity goes to the slow-path call and sizes nothing else; the size is the AllocSize input.
     expand_allocate_common(alloc, capacity,
                            OptoRuntime::new_array_Type(),

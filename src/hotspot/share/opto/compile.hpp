@@ -1118,11 +1118,14 @@ class Compile : public Phase {
   // returns true if adr overlaps with the given alias category
   bool can_alias(const TypePtr* adr, int alias_idx);
 
-  // UseSwissTable: true if adr_type addresses the trailing data of a java.util.SwissTableBuffer,
-  // its control bytes and references beyond its declared fields (see InstanceSwissTableBufferKlass).
-  // That data forms one alias class of its own, like the elements of an array: only Unsafe
-  // accesses of varying sizes reach it, at offsets that are not constant, and no field overlaps it.
+  // True if adr_type addresses the trailing data of a variable-sized instance
+  // (InstanceSwissTableBufferKlass): the control bytes and references of a java.util.SwissTableBuffer
+  // (UseSwissTable), or the elements of a java.util.FastArrayList, beyond their declared fields.
+  // That data forms one alias class per class, like the elements of an array: only Unsafe accesses
+  // reach it, at offsets that are not constant (of varying sizes in a table), and no field overlaps it.
   bool is_swiss_table_buffer_data(const TypePtr* adr_type) const;
+  // ik is java.util.SwissTableBuffer or java.util.FastArrayList.
+  bool is_swiss_table_buffer_klass(ciInstanceKlass* ik) const;
 
   // Stack slots that may be unused by the calling convention but must
   // otherwise be preserved.  On Intel this includes the return address.

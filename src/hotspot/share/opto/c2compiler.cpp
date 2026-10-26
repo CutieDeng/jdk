@@ -686,6 +686,7 @@ bool C2Compiler::is_intrinsic_supported(const methodHandle& method) {
   case vmIntrinsics::_nanoTime:
   case vmIntrinsics::_allocateInstance:
   case vmIntrinsics::_swissTableBufferAllocate:
+  case vmIntrinsics::_fastArrayListAllocate:
     break;
   case vmIntrinsics::_swissMatchTag:
     if (!Matcher::match_rule_supported(Op_SwissGroupMatch)) return false;

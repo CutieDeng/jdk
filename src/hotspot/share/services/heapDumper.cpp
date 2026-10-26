@@ -1509,19 +1509,21 @@ void DumperSupport::dump_object_array(AbstractDumpWriter* writer, objArrayOop ar
   writer->end_sub_record();
 }
 
-// A swiss table (java.util.SwissTableBuffer, the storage of a native HashMap) holds its key/value
-// references after its fields; it is dumped as an Object[] of its aux reference followed by the
-// key/value references, so that heap analyzers follow the references from a map to its contents.
+// A variable-sized instance holds references after its fields: a swiss table
+// (java.util.SwissTableBuffer, the storage of a native HashMap) its keys and values, a
+// java.util.FastArrayList its elements. It is dumped as an Object[] of those references, preceded by
+// the aux reference of a table, so that heap analyzers follow the references to the contents.
 void DumperSupport::dump_swiss_table_buffer(AbstractDumpWriter* writer, oop o) {
   InstanceSwissTableBufferKlass* k = InstanceSwissTableBufferKlass::cast(o->klass());
-  const jint cap = InstanceSwissTableBufferKlass::capacity(o);
-  const int refs_base = k->ctrl_base_in_bytes() + cap;
+  const int refs_base = (int)(k->refs_begin<char>(o) - cast_from_oop<char*>(o));
+  const int aux = k->is_fast_list() ? 0 : 1;
   // sizeof(u1) + 2 * sizeof(u4) + sizeof(objectID) + sizeof(classID)
   short header_size = 1 + 2 * 4 + 2 * sizeof(address);
-  int length = 1 + 2 * cap;
+  int length = aux + InstanceSwissTableBufferKlass::ref_count(o);
   const int max_length = (int) MIN2((size_t) max_jint, (size_t) (max_juint - header_size) / sizeof(address));
   if (length > max_length) {
-    warning("cannot dump swiss table with %d references; truncating to %d", length, max_length);
+    warning("cannot dump %s with %d references; truncating to %d",
+            k->is_fast_list() ? "FastArrayList" : "swiss table", length, max_length);
     length = max_length;
   }
   u4 size = header_size + length * sizeof(address);
@@ -1531,8 +1533,10 @@ void DumperSupport::dump_swiss_table_buffer(AbstractDumpWriter* writer, oop o) {
   writer->write_u4(STACK_TRACE_ID);
   writer->write_u4(length);
   writer->write_classID(Universe::objectArrayKlassObj());
-  writer->write_objectID(o->obj_field_access<AS_NO_KEEPALIVE | ON_UNKNOWN_OOP_REF>(InstanceSwissTableBufferKlass::aux_offset()));
-  for (int index = 0; index < length - 1; index++) {
+  if (aux != 0) {
+    writer->write_objectID(o->obj_field_access<AS_NO_KEEPALIVE | ON_UNKNOWN_OOP_REF>(InstanceSwissTableBufferKlass::aux_offset()));
+  }
+  for (int index = 0; index < length - aux; index++) {
     writer->write_objectID(o->obj_field_access<AS_NO_KEEPALIVE | ON_UNKNOWN_OOP_REF>(refs_base + index * heapOopSize));
   }
   writer->end_sub_record();
@@ -1878,7 +1882,7 @@ void HeapObjectDumper::do_object(oop o) {
   }
 
   if (o->klass()->is_swiss_table_buffer_instance_klass()) {
-    // the storage of a native HashMap, dumped as an Object[] of its references
+    // the storage of a native HashMap, or a FastArrayList: dumped as an Object[] of its references
     DumperSupport::dump_swiss_table_buffer(writer(), o);
   } else if (o->is_instance()) {
     // create a HPROF_GC_INSTANCE record for each object

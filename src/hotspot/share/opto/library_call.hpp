@@ -227,7 +227,7 @@ class LibraryCallKit : public GraphKit {
   bool inline_unsafe_access(bool is_store, BasicType type, AccessKind kind, bool is_unaligned);
   static bool klass_needs_init_guard(Node* kls);
   bool inline_unsafe_allocate();
-  bool inline_swiss_table_buffer_allocate();
+  bool inline_swiss_table_buffer_allocate(bool fast_list);
   bool inline_swiss_match_tag(bool first_lane);
   bool inline_unsafe_newArray(bool uninitialized);
   bool inline_unsafe_writeback0();

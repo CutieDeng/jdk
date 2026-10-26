@@ -1295,17 +1295,21 @@ bool Compile::allow_range_check_smearing() const {
 
 
 //------------------------------flatten_alias_type-----------------------------
+bool Compile::is_swiss_table_buffer_klass(ciInstanceKlass* ik) const {
+  return ik != nullptr && (ik == env()->SwissTableBuffer_klass() || ik == env()->FastArrayList_klass());
+}
+
 bool Compile::is_swiss_table_buffer_data(const TypePtr* adr_type) const {
   const TypeInstPtr* tinst = adr_type->isa_instptr();
   if (tinst == nullptr || !tinst->is_loaded()) {
     return false;
   }
-  ciInstanceKlass* swiss = env()->SwissTableBuffer_klass();
-  if (swiss == nullptr || tinst->instance_klass() != swiss) {
+  ciInstanceKlass* ik = tinst->instance_klass();
+  if (!is_swiss_table_buffer_klass(ik)) {
     return false;
   }
   const int offset = tinst->offset();
-  return offset == Type::OffsetBot || offset >= swiss->layout_helper_size_in_bytes();
+  return offset == Type::OffsetBot || offset >= ik->layout_helper_size_in_bytes();
 }
 
 const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
@@ -1452,8 +1456,9 @@ const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
     } else if (offset < 0 || offset >= ik->layout_helper_size_in_bytes()) {
       // Static fields are in the space above the normal instance
       // fields in the java.lang.Class instance.
-      if (ik == env()->SwissTableBuffer_klass()) {
-        // The trailing data of a java.util.SwissTableBuffer: one alias class (see is_swiss_table_buffer_data)
+      if (is_swiss_table_buffer_klass(ik)) {
+        // The trailing data of a java.util.SwissTableBuffer or java.util.FastArrayList: one alias class
+        // (see is_swiss_table_buffer_data)
         tj = to = TypeInstPtr::make(to->ptr(), ik, true, nullptr, Type::OffsetBot, to->instance_id());
         offset = Type::OffsetBot;
       } else if (ik != ciEnv::current()->Class_klass()) {

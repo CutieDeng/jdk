@@ -504,7 +504,8 @@ bool LibraryCallKit::try_to_inline(int predicate) {
   case vmIntrinsics::_writebackPreSync0:        return inline_unsafe_writebackSync0(true);
   case vmIntrinsics::_writebackPostSync0:       return inline_unsafe_writebackSync0(false);
   case vmIntrinsics::_allocateInstance:         return inline_unsafe_allocate();
-  case vmIntrinsics::_swissTableBufferAllocate:       return inline_swiss_table_buffer_allocate();
+  case vmIntrinsics::_swissTableBufferAllocate:       return inline_swiss_table_buffer_allocate(false);
+  case vmIntrinsics::_fastArrayListAllocate:          return inline_swiss_table_buffer_allocate(true);
   case vmIntrinsics::_swissMatchTag:            return inline_swiss_match_tag(false);
   case vmIntrinsics::_swissFirstTagLane:        return inline_swiss_match_tag(true);
   case vmIntrinsics::_copyMemory:               return inline_unsafe_copyMemory();
@@ -2874,43 +2875,49 @@ bool LibraryCallKit::inline_unsafe_allocate() {
 
 //------------------------inline_swiss_table_buffer_allocate----------------------
 // java.util.SwissTableBuffer.allocate(int capacity): the single storage buffer of a native HashMap
-// (-XX:+UseSwissTable), a variable-sized instance (InstanceSwissTableBufferKlass). Allocated like an
-// array: a TLAB fast path for valid capacities below 2^16 (0, or a power of two of at least 8),
-// which writes the header and clears the body (control bytes EMPTY, references null); anything
-// else, and a full TLAB, goes to OptoRuntime::new_swiss_table_buffer_C, which rejects invalid capacities.
+// (-XX:+UseSwissTable); with fast_list, java.util.FastArrayList.allocate(int capacity): a list that is
+// its own buffer. Both are variable-sized instances (InstanceSwissTableBufferKlass), each with the
+// layout of its class. Allocated like an array: a TLAB fast path for valid capacities below 2^16
+// (SwissTableBuffer: 0, or a power of two of at least 8; FastArrayList: any), which writes the header
+// and clears the body (control bytes EMPTY, references null); anything else, and a full TLAB, goes to
+// OptoRuntime::new_swiss_table_buffer_C, which rejects invalid capacities.
 // The capacity rides in the AllocateNode's length input to reach the slow path (see
 // PhaseMacroExpand::expand_allocate). The fast path does not write it there: it is stored below as
 // an ordinary field store, which the InitializeNode captures, so that it is written before the
 // object is published and so that loads of the field in this compilation see it rather than the
 // zero of a fresh allocation.
-bool LibraryCallKit::inline_swiss_table_buffer_allocate() {
-  ciInstanceKlass* ik = C->env()->SwissTableBuffer_klass();
+bool LibraryCallKit::inline_swiss_table_buffer_allocate(bool fast_list) {
+  ciInstanceKlass* ik = fast_list ? C->env()->FastArrayList_klass() : C->env()->SwissTableBuffer_klass();
   if (ik == nullptr || !ik->is_loaded() || !ik->is_initialized()) {
     return false;
   }
-  ciField* capacity_field = ik->get_field_by_offset(InstanceSwissTableBufferKlass::capacity_offset(), false);
+  const InstanceSwissTableBufferKlass::Layout& layout =
+      fast_list ? InstanceSwissTableBufferKlass::fast_list_layout() : InstanceSwissTableBufferKlass::swiss_layout();
+  ciField* capacity_field = ik->get_field_by_offset(layout.capacity_offset, false);
   if (capacity_field == nullptr) {
     return false;
   }
   Node* capacity = argument(0);
 
-  // slow unless capacity is 0 or a power of two >= 8, below 2^16:
-  // capacity & ((capacity - 1) | 7) is 0 exactly for 0 and powers of two >= 8;
   // capacity >>> 16 is 0 exactly for 0 <= capacity < 2^16
-  Node* low_bits  = _gvn.transform(new OrINode(_gvn.transform(new SubINode(capacity, intcon(1))), intcon(7)));
-  Node* invalid   = _gvn.transform(new AndINode(capacity, low_bits));
-  Node* too_big   = _gvn.transform(new URShiftINode(capacity, intcon(16)));
-  Node* bad_bits  = _gvn.transform(new OrINode(invalid, too_big));
+  Node* bad_bits = _gvn.transform(new URShiftINode(capacity, intcon(16)));
+  if (!fast_list) {
+    // and capacity & ((capacity - 1) | 7) is 0 exactly for 0 and powers of two >= 8
+    Node* low_bits = _gvn.transform(new OrINode(_gvn.transform(new SubINode(capacity, intcon(1))), intcon(7)));
+    Node* invalid  = _gvn.transform(new AndINode(capacity, low_bits));
+    bad_bits = _gvn.transform(new OrINode(invalid, bad_bits));
+  }
   Node* slow_cmp  = _gvn.transform(new CmpINode(bad_bits, intcon(0)));
   Node* slow_test = _gvn.transform(new BoolNode(slow_cmp, BoolTest::ne));
 
-  // size in bytes: the fixed part (word aligned), then one control byte and two references per slot,
-  // rounded up to the object alignment like InstanceSwissTableBufferKlass::instance_size (a no-op for
-  // valid capacities unless ObjectAlignmentInBytes > 8)
-  const int ctrl_base = ik->size_helper() << LogHeapWordSize;
-  Node* bytes = _gvn.transform(new MulXNode(ConvI2X(capacity), MakeConX(1 + 2 * heapOopSize)));
-  Node* size  = _gvn.transform(new AddXNode(bytes, MakeConX(ctrl_base)));
-  if (MinObjAlignmentInBytes > BytesPerLong) {
+  // size in bytes: the declared part (to the trailing data), then the primitive bytes and the
+  // references of each unit of capacity, rounded up to the object alignment like
+  // InstanceSwissTableBufferKlass::instance_size (for a SwissTableBuffer a no-op for valid capacities
+  // unless ObjectAlignmentInBytes > 8; a FastArrayList of 4-byte references may end mid-word)
+  const int per_slot = layout.bytes_per_slot + layout.refs_per_slot * heapOopSize;
+  Node* bytes = _gvn.transform(new MulXNode(ConvI2X(capacity), MakeConX(per_slot)));
+  Node* size  = _gvn.transform(new AddXNode(bytes, MakeConX(layout.data_base)));
+  if (fast_list || MinObjAlignmentInBytes > BytesPerLong) {
     Node* rounded = _gvn.transform(new AddXNode(size, MakeConX(MinObjAlignmentInBytes - 1)));
     size = _gvn.transform(new AndXNode(rounded, MakeConX(~(intptr_t)(MinObjAlignmentInBytes - 1))));
   }
@@ -2923,11 +2930,15 @@ bool LibraryCallKit::inline_swiss_table_buffer_allocate() {
   AllocateNode* alloc = new AllocateNode(C, AllocateNode::alloc_type(TypeInt::INT),
                                          control(), mem, i_o(), size, klass_node, slow_test);
   Node* obj = set_output_for_allocation(alloc, oop_type);
-  alloc->set_req(AllocateNode::ALength, capacity);    // marks the allocation as a SwissTableBuffer
+  alloc->set_req(AllocateNode::ALength, capacity);    // marks the allocation as variable sized
 
   Node* adr = basic_plus_adr(obj, capacity_field->offset_in_bytes());
   const TypePtr* adr_type = C->alias_type(capacity_field)->adr_type();
-  store_to_memory(control(), adr, capacity, T_INT, adr_type, MemNode::unordered);
+  if (layout.capacity_is_long) {
+    store_to_memory(control(), adr, ConvI2L(capacity), T_LONG, adr_type, MemNode::unordered);
+  } else {
+    store_to_memory(control(), adr, capacity, T_INT, adr_type, MemNode::unordered);
+  }
   set_result(obj);
   return true;
 }

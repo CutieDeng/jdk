@@ -33,17 +33,23 @@
 #include "utilities/globalDefinitions.hpp"
 
 inline jint InstanceSwissTableBufferKlass::capacity(oop obj) {
-  return obj->int_field(_capacity_offset);
+  const Layout& l = layout(obj->klass());
+  return l.capacity_is_long ? (jint)obj->long_field(l.capacity_offset) : obj->int_field(l.capacity_offset);
+}
+
+inline int InstanceSwissTableBufferKlass::ref_count(oop obj) {
+  return layout(obj->klass()).refs_per_slot * capacity(obj);
 }
 
 template <typename T>
 inline T* InstanceSwissTableBufferKlass::refs_begin(oop obj) const {
-  return (T*)(cast_from_oop<address>(obj) + ctrl_base_in_bytes() + capacity(obj));
+  const Layout& l = layout();
+  return (T*)(cast_from_oop<address>(obj) + l.data_base + (size_t)l.bytes_per_slot * capacity(obj));
 }
 
 template <typename T>
 inline T* InstanceSwissTableBufferKlass::refs_end(oop obj) const {
-  return refs_begin<T>(obj) + 2 * (size_t)capacity(obj);
+  return refs_begin<T>(obj) + (size_t)layout().refs_per_slot * capacity(obj);
 }
 
 template <typename T, class OopClosureType>

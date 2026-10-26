@@ -21,6 +21,7 @@
  *
  */
 
+
 #ifndef SHARE_OOPS_INSTANCESWISSTABLEBUFFERKLASS_HPP
 #define SHARE_OOPS_INSTANCESWISSTABLEBUFFERKLASS_HPP
 
@@ -33,9 +34,12 @@ class MemRegion;
 
 /************************************************
 
- The single storage buffer of a java.util.SwissTable (-XX:+UseSwissTable): an instance of
- java.util.SwissTableBuffer whose size depends on its capacity, so a table is one heap object instead of a
- control array plus a slot array.
+ Instances whose size depends on a capacity field: declared fields, then trailing data of
+ primitive bytes and heap references, sized by the capacity. Two classes of java.base have this
+ kind, each with a Layout of its own:
+
+ java.util.SwissTableBuffer, the single storage buffer of a java.util.SwissTable
+ (-XX:+UseSwissTable), so a table is one heap object instead of a control array plus a slot array.
 
                    +--------------------------------+  0
                    | object header                  |
@@ -51,11 +55,33 @@ class MemRegion;
                    |                                |  at 2i, its value at 2i + 1
                    +--------------------------------+  ctrl_base + capacity * (1 + 2 * heapOopSize)
 
- capacity is 0 or a power of two >= 8, so both regions are word aligned. The garbage collectors
- visit the declared reference field and the trailing references; the control bytes are primitive
- data. capacity is written before the klass is published, so the object is parsable as soon as a
- concurrent collector can see it. Java code reads and writes the buffer with Unsafe, so every
- reference access carries the collector's barriers in the interpreter, C1 and C2.
+ capacity is 0 or a power of two >= 8, so both regions are word aligned.
+
+ java.util.FastArrayList, a list that is its own buffer: size, capacity and elements in one object.
+
+                   +--------------------------------+  0
+                   | object header                  |
+                   | declared fields:               |
+                   |   int size                     |  -1 once the list was replaced by a larger one
+                   |   long cap                     |  the capacity, never changed
+                   +================================+  data_base: the instance size of the class
+                   | elements                       |  (8 more without compressed oops, see below)
+                   |                                |  cap heap oops
+                   +--------------------------------+  data_base + cap * heapOopSize, rounded up to
+                                                       the object alignment
+
+ cap is any value from 0 to max_capacity(). No two hot locations of one access size are adjacent
+ (size, cap, element 0): the MacroAssembler merges adjacent loads or stores of one size into
+ ldp/stp, and a load pair that an older 4-byte store covers only in part cannot take its data from
+ the store (Kunpeng 920: 13 instead of 8 cycles per dependent step). Without compressed oops
+ element 0 would follow cap with the same size, so the elements start 8 bytes later.
+
+ The garbage collectors visit the declared reference fields and the trailing references; the
+ primitive bytes are not references. The capacity is written before the klass is published, so the
+ object is parsable as soon as a concurrent collector can see it. Java code reads and writes the
+ trailing data with Unsafe, so every reference access carries the collector's barriers in the
+ interpreter, C1 and C2. In C2 the trailing data of each class is one alias class of its own
+ (Compile::is_swiss_table_buffer_data).
 
 ************************************************/
 
@@ -66,9 +92,21 @@ class InstanceSwissTableBufferKlass: public InstanceKlass {
 public:
   static const KlassKind Kind = InstanceSwissTableBufferKlassKind;
 
+  // Where the capacity is and how the trailing data is laid out, for one class of this kind.
+  struct Layout {
+    int  capacity_offset;      // offset of the capacity field
+    bool capacity_is_long;     // a long field (else an int); the capacity itself is below 2^31
+    int  data_base;            // offset of the trailing data, word aligned
+    int  bytes_per_slot;       // primitive bytes per unit of capacity, at data_base (0: none)
+    int  refs_per_slot;        // references per unit of capacity, after the primitive bytes
+  };
+
 private:
-  static int _capacity_offset;
-  static int _aux_offset;
+  static Layout _swiss;                     // java.util.SwissTableBuffer
+  static Layout _fast_list;                 // java.util.FastArrayList
+  static const Klass* _fast_list_klass;     // set by init_offsets
+  static int _aux_offset;                   // SwissTableBuffer.aux
+  static int _fast_list_size_offset;        // FastArrayList.size
 
   InstanceSwissTableBufferKlass(const ClassFileParser& parser);
 
@@ -80,24 +118,38 @@ public:
     return static_cast<InstanceSwissTableBufferKlass*>(k);
   }
 
-  // Field offsets of java.util.SwissTableBuffer, computed once the class is loaded.
+  // Field offsets and layouts of java.util.SwissTableBuffer and java.util.FastArrayList, computed
+  // once the classes are loaded.
   static void init_offsets();
-  static int capacity_offset() { return _capacity_offset; }
-  static int aux_offset() { return _aux_offset; }
 
-  // Byte offset of the control bytes: the instance size of the class, word aligned.
+  static const Layout& layout(const Klass* k) { return k == _fast_list_klass ? _fast_list : _swiss; }
+  const Layout& layout() const { return layout(this); }
+  bool is_fast_list() const { return this == _fast_list_klass; }
+  static const Layout& swiss_layout() { return _swiss; }
+  static const Layout& fast_list_layout() { return _fast_list; }
+
+  static int capacity_offset() { return _swiss.capacity_offset; }   // SwissTableBuffer.capacity
+  static int aux_offset() { return _aux_offset; }
+  static int fast_list_size_offset() { return _fast_list_size_offset; }
+
+  // Byte offset of the control bytes of a SwissTableBuffer: the instance size of the class.
   int ctrl_base_in_bytes() const { return size_helper() << LogHeapWordSize; }
+  // Byte offset of the trailing data.
+  int data_base_in_bytes() const { return layout().data_base; }
 
   static jint capacity(oop obj);
 
-  // Size in words of a table with the given capacity.
+  // Size in words of an instance with the given capacity.
   size_t instance_size(jint capacity) const;
-  // Largest capacity whose instance size fits the limits below.
-  static jint max_capacity();
+  // Largest capacity whose instance size stays below 2^31 bytes.
+  jint max_capacity() const;
+  // Whether an instance of this class may have the given capacity.
+  bool is_valid_capacity(jint capacity) const;
 
   virtual size_t oop_size(oop obj) const override;
 
-  // Allocates a zeroed table: every control byte EMPTY (0), every reference null.
+  // Allocates a zeroed instance: every primitive byte 0 (a table's control bytes EMPTY), every
+  // reference null.
   instanceOop allocate_table(jint capacity, TRAPS);
 
   // The trailing references of obj.
@@ -106,14 +158,14 @@ public:
 
   // Chunked marking (the full collections, which split object arrays into ObjArrayTasks): the
   // trailing references by index, like the elements of an object array; the instance part (the
-  // metadata and the declared reference field) separately, once.
-  static int ref_count(oop obj) { return 2 * capacity(obj); }
+  // metadata and the declared reference fields) separately, once.
+  static inline int ref_count(oop obj);
   template <class OopClosureType>
   static inline void oop_iterate_refs(oop obj, OopClosureType* cl, int start, int end);
   template <class OopClosureType>
   static inline void oop_iterate_instance(oop obj, OopClosureType* cl);
 
-  // Oop fields (and metadata) iterators: the declared reference field, then the trailing references.
+  // Oop fields (and metadata) iterators: the declared reference fields, then the trailing references.
 
   // Forward iteration
   template <typename T, class OopClosureType>

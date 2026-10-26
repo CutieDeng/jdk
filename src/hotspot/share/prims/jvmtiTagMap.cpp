@@ -2726,13 +2726,14 @@ inline bool VM_HeapWalkOperation::iterate_over_object(oop o) {
     }
   }
 
-  // the trailing key/value references of a swiss table (java.util.SwissTableBuffer, the storage of a
-  // native HashMap) are not fields: report them like the elements of an object array
+  // the trailing references of a variable-sized instance (the keys and values of a
+  // java.util.SwissTableBuffer, the storage of a native HashMap; the elements of a
+  // java.util.FastArrayList) are not fields: report them like the elements of an object array
   if (o->klass()->is_swiss_table_buffer_instance_klass()) {
     InstanceSwissTableBufferKlass* k = InstanceSwissTableBufferKlass::cast(o->klass());
-    const jint cap = InstanceSwissTableBufferKlass::capacity(o);
-    const int refs_base = k->ctrl_base_in_bytes() + cap;
-    for (int index = 0; index < 2 * cap; index++) {
+    const int refs_base = (int)(k->refs_begin<char>(o) - cast_from_oop<char*>(o));
+    const int count = InstanceSwissTableBufferKlass::ref_count(o);
+    for (int index = 0; index < count; index++) {
       oop elem = o->obj_field_access<AS_NO_KEEPALIVE | ON_UNKNOWN_OOP_REF>(refs_base + index * heapOopSize);
       if (elem != nullptr && !CallbackInvoker::report_array_element_reference(o, elem, index)) {
         return false;
