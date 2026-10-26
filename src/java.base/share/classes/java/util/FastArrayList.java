@@ -362,19 +362,16 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         if (s < 0) {
             return forwardee().getHere(index);
         }
-        if (!inBounds(index, s)) {
-            throw outOfBounds(index, s);
-        }
+        // checkIndex rather than one unsigned compare: C2's intrinsic (a RangeCheck, and the index cast
+        // to [0, s)) gives the code of the explicit-interface version; the compare made get 1.5% slower
+        Preconditions.checkIndex(index, s, Preconditions.IOOBE_FORMATTER);
         return at(index);
     }
 
     /** get(int) on a storage. */
     @ForceInline
     private E getHere(int index) {
-        int s = sizeOf(this);
-        if (!inBounds(index, s)) {
-            throw outOfBounds(index, s);
-        }
+        Preconditions.checkIndex(index, sizeOf(this), Preconditions.IOOBE_FORMATTER);
         return at(index);
     }
 
@@ -391,9 +388,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         if (s < 0) {
             return forwardee().setHere(index, element);
         }
-        if (!inBounds(index, s)) {
-            throw outOfBounds(index, s);
-        }
+        Preconditions.checkIndex(index, s, Preconditions.IOOBE_FORMATTER);   // see get(int)
         E old = at(index);
         put(index, element);
         return old;
@@ -402,10 +397,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     /** set(int, E) on a storage. */
     @ForceInline
     private E setHere(int index, E element) {
-        int s = sizeOf(this);
-        if (!inBounds(index, s)) {
-            throw outOfBounds(index, s);
-        }
+        Preconditions.checkIndex(index, sizeOf(this), Preconditions.IOOBE_FORMATTER);
         E old = at(index);
         put(index, element);
         return old;
