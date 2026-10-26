@@ -506,6 +506,7 @@ bool LibraryCallKit::try_to_inline(int predicate) {
   case vmIntrinsics::_allocateInstance:         return inline_unsafe_allocate();
   case vmIntrinsics::_swissTableBufferAllocate:       return inline_swiss_table_buffer_allocate(false);
   case vmIntrinsics::_fastArrayListAllocate:          return inline_swiss_table_buffer_allocate(true);
+  case vmIntrinsics::_fastArrayListCopySlots:         return inline_fast_list_copy_slots();
   case vmIntrinsics::_swissMatchTag:            return inline_swiss_match_tag(false);
   case vmIntrinsics::_swissFirstTagLane:        return inline_swiss_match_tag(true);
   case vmIntrinsics::_copyMemory:               return inline_unsafe_copyMemory();
@@ -2940,6 +2941,48 @@ bool LibraryCallKit::inline_swiss_table_buffer_allocate(bool fast_list) {
     store_to_memory(control(), adr, capacity, T_INT, adr_type, MemNode::unordered);
   }
   set_result(obj);
+  return true;
+}
+
+//------------------------inline_fast_list_copy_slots----------------------------
+// java.util.FastArrayList.copySlots0(FastArrayList src, int srcPos, FastArrayList dst, int dstPos, int n):
+// copies n element slots, the ranges possibly overlapping; the Java caller (copySlots) has checked
+// both ranges against the capacities. A call of the conjoint object-array copy stub on the slot
+// addresses, which applies the collector's barriers to the destination range as a whole (the stub
+// System.arraycopy uses for Object[]). The call reads and writes only the trailing data of
+// FastArrayList, one alias class (Compile::is_swiss_table_buffer_data), so the lists' other fields
+// keep their values across it.
+bool LibraryCallKit::inline_fast_list_copy_slots() {
+  ciInstanceKlass* ik = C->env()->FastArrayList_klass();
+  if (ik == nullptr || !ik->is_loaded() || StubRoutines::oop_arraycopy() == nullptr) {
+    return false;
+  }
+  Node* src     = argument(0);
+  Node* src_pos = argument(1);
+  Node* dst     = argument(2);
+  Node* dst_pos = argument(3);
+  Node* n       = argument(4);
+  src = null_check(src);
+  if (stopped()) {
+    return true;
+  }
+  dst = null_check(dst);
+  if (stopped()) {
+    return true;
+  }
+  const int data_base = InstanceSwissTableBufferKlass::fast_list_layout().data_base;
+  const int shift = exact_log2(heapOopSize);
+  Node* src_off   = _gvn.transform(new AddXNode(MakeConX(data_base), _gvn.transform(new LShiftXNode(ConvI2X(src_pos), intcon(shift)))));
+  Node* dst_off   = _gvn.transform(new AddXNode(MakeConX(data_base), _gvn.transform(new LShiftXNode(ConvI2X(dst_pos), intcon(shift)))));
+  Node* src_start = basic_plus_adr(src, src_off);
+  Node* dst_start = basic_plus_adr(dst, dst_off);
+  const TypePtr* adr_type = C->alias_type(TypeInstPtr::make(TypePtr::NotNull, ik, true, nullptr, Type::OffsetBot))->adr_type();
+  assert(C->is_swiss_table_buffer_data(adr_type), "the trailing data of FastArrayList");
+  make_runtime_call(RC_LEAF | RC_NO_FP | RC_NARROW_MEM,
+                    OptoRuntime::fast_arraycopy_Type(),
+                    StubRoutines::oop_arraycopy(), "oop_arraycopy",
+                    adr_type,
+                    src_start, dst_start, ConvI2X(n) XTOP);
   return true;
 }
 

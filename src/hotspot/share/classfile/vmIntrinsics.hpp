@@ -656,6 +656,9 @@ class methodHandle;
    do_signature(swissTableBufferAllocate_signature,                     "(I)Ljava/util/SwissTableBuffer;")                       \
   do_intrinsic(_fastArrayListAllocate,    java_util_FastArrayList,      allocate_name, fastArrayListAllocate_signature, F_SN)    \
    do_signature(fastArrayListAllocate_signature,                        "(I)Ljava/util/FastArrayList;")                          \
+  do_intrinsic(_fastArrayListCopySlots,   java_util_FastArrayList,      copySlots0_name, fastArrayListCopySlots_signature, F_S)  \
+   do_name(     copySlots0_name,                                        "copySlots0")                                            \
+   do_signature(fastArrayListCopySlots_signature,                       "(Ljava/util/FastArrayList;ILjava/util/FastArrayList;II)V") \
   do_intrinsic(_swissMatchTag,            java_util_SwissTable,         matchTagAt_name, swissMatchTag_signature, F_S)           \
    do_name(     matchTagAt_name,                                        "matchTagAt")                                            \
    do_signature(swissMatchTag_signature,                                "(Ljava/util/SwissTableBuffer;JI)J")                     \

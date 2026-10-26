@@ -34,6 +34,7 @@ import java.util.function.Consumer;
 import jdk.internal.misc.Unsafe;
 import jdk.internal.util.ArraysSupport;
 import jdk.internal.util.Preconditions;
+import jdk.internal.vm.annotation.ForceInline;
 import jdk.internal.vm.annotation.IntrinsicCandidate;
 
 /**
@@ -171,6 +172,35 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         U.putReference(this, offset(index), e);
     }
 
+    /**
+     * Copies n slots of src from srcPos to the slots of dst from dstPos, as System.arraycopy copies the
+     * elements of arrays (the ranges may overlap). Both ranges are checked against the capacities, so
+     * that no copy reaches outside a list whatever its caller computed.
+     */
+    private static void copySlots(FastArrayList<?> src, int srcPos, FastArrayList<?> dst, int dstPos, int n) {
+        Preconditions.checkFromIndexSize(srcPos, n, (int) src.cap, Preconditions.AIOOBE_FORMATTER);
+        Preconditions.checkFromIndexSize(dstPos, n, (int) dst.cap, Preconditions.AIOOBE_FORMATTER);
+        copySlots0(src, srcPos, dst, dstPos, n);
+    }
+
+    /**
+     * copySlots without the checks. C2 replaces the loops by a call of the object-array copy stub
+     * (StubRoutines::oop_arraycopy), which applies the collector's barriers to the whole destination
+     * range at once.
+     */
+    @IntrinsicCandidate
+    private static void copySlots0(FastArrayList<?> src, int srcPos, FastArrayList<?> dst, int dstPos, int n) {
+        if (src == dst && srcPos < dstPos) {
+            for (int i = n - 1; i >= 0; i--) {
+                dst.put(dstPos + i, src.at(srcPos + i));
+            }
+        } else {
+            for (int i = 0; i < n; i++) {
+                dst.put(dstPos + i, src.at(srcPos + i));
+            }
+        }
+    }
+
     /** Raises the exception for an index out of [0, size), size being REPLACED for a replaced list. */
     private static final class OutOfBounds implements BiFunction<String, List<Number>, RuntimeException> {
         @Override
@@ -189,6 +219,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     }
 
     /** The size of a list that was not replaced. */
+    @ForceInline
     private int liveSize() {
         int s = size;
         if (s < 0) {
@@ -211,9 +242,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     private FastArrayList<E> moveTo(int capacity) {
         int s = Math.min(liveSize(), capacity);
         FastArrayList<E> n = withCapacity(capacity);
-        for (int i = 0; i < s; i++) {
-            n.put(i, at(i));
-        }
+        copySlots(this, 0, n, 0, s);
         n.size = s;
         return replacedBy(n);
     }
@@ -238,6 +267,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * {@return the number of elements}
      * @throws IllegalStateException if this list was replaced
      */
+    @ForceInline
     public int size() {
         return liveSize();
     }
@@ -246,6 +276,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * {@return the number of elements this list can hold}
      * @throws IllegalStateException if this list was replaced
      */
+    @ForceInline
     public int capacity() {
         liveSize();
         return (int) cap;
@@ -255,6 +286,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * {@return whether this list has no elements}
      * @throws IllegalStateException if this list was replaced
      */
+    @ForceInline
     public boolean isEmpty() {
         return liveSize() == 0;
     }
@@ -354,9 +386,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         int s = liveSize();
         Objects.checkIndex(index, s + 1);
         FastArrayList<E> l = s < cap ? this : moveTo(grownCapacity(s + 1));
-        for (int i = s; i > index; i--) {
-            l.put(i, l.at(i - 1));
-        }
+        copySlots(l, index, l, index + 1, s - index);
         l.put(index, element);
         l.size = s + 1;
         return l;
@@ -424,9 +454,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         int s = size;                              // read once: every slot written below is under s
         Preconditions.checkIndex(index, s, OUT_OF_BOUNDS);
         E old = at(index);
-        for (int i = index + 1; i < s; i++) {
-            put(i - 1, at(i));
-        }
+        copySlots(this, index + 1, this, index, s - index - 1);
         put(s - 1, null);
         size = s - 1;
         return old;
@@ -549,8 +577,8 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
 
         @Override
         public boolean hasNext() {
-            checkSize();
-            return cursor < expectedSize;
+            // as ArrayList's: a changed size (REPLACED included) makes the next call of next() throw
+            return cursor != size;
         }
 
         @Override

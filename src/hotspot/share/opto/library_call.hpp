@@ -228,6 +228,7 @@ class LibraryCallKit : public GraphKit {
   static bool klass_needs_init_guard(Node* kls);
   bool inline_unsafe_allocate();
   bool inline_swiss_table_buffer_allocate(bool fast_list);
+  bool inline_fast_list_copy_slots();
   bool inline_swiss_match_tag(bool first_lane);
   bool inline_unsafe_newArray(bool uninitialized);
   bool inline_unsafe_writeback0();
