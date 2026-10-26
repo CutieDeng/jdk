@@ -34,6 +34,7 @@ import java.util.function.Consumer;
 import jdk.internal.misc.Unsafe;
 import jdk.internal.util.ArraysSupport;
 import jdk.internal.util.Preconditions;
+import jdk.internal.vm.annotation.DontInline;
 import jdk.internal.vm.annotation.ForceInline;
 import jdk.internal.vm.annotation.IntrinsicCandidate;
 
@@ -203,6 +204,26 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         }
     }
 
+    /**
+     * A list of the given capacity with the first n elements of src, and size n; src is unchanged.
+     * Both ranges are checked against the capacities, as by copySlots.
+     * The new list is cleared when allocated, before the store-store barrier that orders its
+     * initialization before its publication, and the copy follows. Copying into the uncleared list
+     * and clearing only the rest, as C2 does for Arrays.copyOf, needs the barrier after the copy;
+     * on Kunpeng 920 that costs more than the clearing it saves (grow16 of ListProbe: 16.5 against
+     * 14.8 cycles per add).
+     */
+    @ForceInline
+    @SuppressWarnings("unchecked")
+    private static <T> FastArrayList<T> copyOfSlots(FastArrayList<?> src, int n, int capacity) {
+        Preconditions.checkFromIndexSize(0, n, (int) src.cap, Preconditions.AIOOBE_FORMATTER);
+        Preconditions.checkFromIndexSize(0, n, capacity, Preconditions.AIOOBE_FORMATTER);
+        FastArrayList<T> l = (FastArrayList<T>) allocate(capacity);
+        copySlots0(src, 0, l, 0, n);
+        l.size = n;
+        return l;
+    }
+
     /** Raises the exception for an index out of [0, size), size being REPLACED for a replaced list. */
     private static final class OutOfBounds implements BiFunction<String, List<Number>, RuntimeException> {
         @Override
@@ -231,6 +252,7 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     }
 
     /** Marks this list replaced by its successor, which already holds the elements. */
+    @ForceInline
     private <T> FastArrayList<T> replacedBy(FastArrayList<T> successor) {
         size = REPLACED;
         return successor;
@@ -239,20 +261,18 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
     /**
      * A list of the given capacity with the elements of this one, which it replaces. The size is read
      * once, and at most capacity elements are copied: a racing change of this list must not make the
-     * copy write beyond the new list.
+     * copy write beyond the new list. The callers compute capacities in [1, MAX_CAPACITY].
      */
+    @ForceInline
     private FastArrayList<E> moveTo(int capacity) {
-        int s = Math.min(liveSize(), capacity);
-        FastArrayList<E> n = withCapacity(capacity);
-        copySlots(this, 0, n, 0, s);
-        n.size = s;
-        return replacedBy(n);
+        return replacedBy(copyOfSlots(this, Math.min(liveSize(), capacity), capacity));
     }
 
     /**
      * A capacity of at least minCapacity, grown like java.util.ArrayList grows its array: by half,
      * and to at least DEFAULT_CAPACITY from a smaller capacity (as ArrayList's first growth).
      */
+    @ForceInline
     private int grownCapacity(int minCapacity) {
         int old = (int) cap;
         int c = old < DEFAULT_CAPACITY ? Math.max(DEFAULT_CAPACITY, minCapacity)
@@ -369,6 +389,8 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         return this;
     }
 
+    /** The growth of add(E), out of line so that add(E) stays small enough to inline everywhere. */
+    @DontInline
     private FastArrayList<E> addToLarger(E e) {
         int s = liveSize();
         FastArrayList<E> n = moveTo(grownCapacity(s + 1));
