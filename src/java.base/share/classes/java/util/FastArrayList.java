@@ -97,7 +97,9 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      *          two adjacent hot fields have the same size (see the VM layout comment)
      * The elements 0..size-1 are at DATA_BASE + (i << REF_SHIFT); the slots from size to cap are null.
      * Memory safety does not depend on the size being right: every element access checks its index
-     * against the size, which is always between REPLACED and cap, and cap never changes.
+     * against the size, which is always between REPLACED and cap, and cap never changes. Each method
+     * reads the size once and bounds all its slot accesses by that value (or by a snapshot of an
+     * iterator), so that a racing change cannot make it access a slot outside [0, cap).
      */
     private transient int size;
     private final transient long cap;
@@ -201,9 +203,13 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
         return successor;
     }
 
-    /** A list of the given capacity with the elements of this one, which it replaces. */
+    /**
+     * A list of the given capacity with the elements of this one, which it replaces. The size is read
+     * once, and at most capacity elements are copied: a racing change of this list must not make the
+     * copy write beyond the new list.
+     */
     private FastArrayList<E> moveTo(int capacity) {
-        int s = size;
+        int s = Math.min(liveSize(), capacity);
         FastArrayList<E> n = withCapacity(capacity);
         for (int i = 0; i < s; i++) {
             n.put(i, at(i));
@@ -415,8 +421,8 @@ public final class FastArrayList<E> implements Iterable<E>, RandomAccess, Serial
      * @throws IllegalStateException if this list was replaced
      */
     public E remove(int index) {
-        Preconditions.checkIndex(index, size, OUT_OF_BOUNDS);
-        int s = size;
+        int s = size;                              // read once: every slot written below is under s
+        Preconditions.checkIndex(index, s, OUT_OF_BOUNDS);
         E old = at(index);
         for (int i = index + 1; i < s; i++) {
             put(i - 1, at(i));
