@@ -688,6 +688,8 @@ bool C2Compiler::is_intrinsic_supported(const methodHandle& method) {
   case vmIntrinsics::_swissTableBufferAllocate:
   case vmIntrinsics::_fastArrayListAllocate:
   case vmIntrinsics::_fastArrayListCopySlots:
+  case vmIntrinsics::_fastArrayListCapWord:
+  case vmIntrinsics::_fastArrayListForwardFence:
     break;
   case vmIntrinsics::_swissMatchTag:
     if (!Matcher::match_rule_supported(Op_SwissGroupMatch)) return false;

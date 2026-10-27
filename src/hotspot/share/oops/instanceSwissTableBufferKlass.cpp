@@ -38,7 +38,7 @@
 #include "utilities/powerOfTwo.hpp"
 
 InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_swiss     = { -1, false, -1, 1, 2 };
-InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_fast_list = { -1, true,  -1, 0, 1 };
+InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_fast_list = { -1, false, -1, 0, 1 };
 const Klass* InstanceSwissTableBufferKlass::_fast_list_klass = nullptr;
 int InstanceSwissTableBufferKlass::_aux_offset = -1;
 int InstanceSwissTableBufferKlass::_fast_list_size_offset = -1;
@@ -72,15 +72,17 @@ void InstanceSwissTableBufferKlass::init_offsets() {
   guarantee(f->is_swiss_table_buffer_instance_klass(), "java.util.FastArrayList must have InstanceSwissTableBufferKlass");
   _fast_list_size_offset = local_field_offset(f, "size", vmSymbols::int_signature(),
                                               "java.util.FastArrayList must declare int size");
-  _fast_list.capacity_offset = local_field_offset(f, "cap", vmSymbols::long_signature(),
-                                                  "java.util.FastArrayList must declare long cap");
+  _fast_list.capacity_offset = local_field_offset(f, "cap", vmSymbols::int_signature(),
+                                                  "java.util.FastArrayList must declare int cap");
   // The elements follow the declared fields. Element 0 must not be adjacent to a field of its own
-  // size (see the class comment): size is an int, cap a long.
+  // size that is loaded on its own (see the class comment): size; cap unless it starts an aligned
+  // word, which the Java code then reads at once (with fwd, when fwd is the other half).
   int base = cast(f)->ctrl_base_in_bytes();
   if (base == _fast_list_size_offset + BytesPerInt && heapOopSize == BytesPerInt) {
     base += heapOopSize;
   }
-  if (base == _fast_list.capacity_offset + BytesPerLong && heapOopSize == BytesPerLong) {
+  if (base == _fast_list.capacity_offset + BytesPerInt && heapOopSize == BytesPerInt &&
+      !is_aligned(_fast_list.capacity_offset, BytesPerLong)) {
     base += heapOopSize;
   }
   guarantee(is_aligned(base, heapOopSize), "FastArrayList elements must be aligned");

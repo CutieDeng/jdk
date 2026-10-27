@@ -80,12 +80,30 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     private static final int MAX_CAPACITY;
     /** Byte offset of the fwd field. */
     private static final long FWD;
+    /** Byte offset of the cap field. */
+    private static final long CAP;
+    /**
+     * Whether cap starts an aligned 8-byte word, which capWord0 reads: with compressed class
+     * pointers. Then cap is read only as that word, so that it is not loaded on its own next to size
+     * (see the VM layout comment).
+     */
+    private static final boolean CAP_WORD;
+    /**
+     * Whether fwd is the other half of that word: with compressed oops too (cap at 16, fwd at 20).
+     * Then the word tells whether the list forwards as well, and fwd is loaded on its own only from
+     * a list that forwards, so that it is not loaded next to element 0 of a list that has elements.
+     */
+    private static final boolean FWD_IN_WORD;
+    private static final boolean BIG_ENDIAN = U.isBigEndian();
 
     static {
         registerNatives();
         DATA_BASE = dataBase();
         MAX_CAPACITY = maxCapacity();
         FWD = U.objectFieldOffset(FastArrayList.class, "fwd");
+        CAP = U.objectFieldOffset(FastArrayList.class, "cap");
+        CAP_WORD = (CAP & 7) == 0;
+        FWD_IN_WORD = CAP_WORD && FWD == CAP + 4;
     }
 
     /*
@@ -94,12 +112,19 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      *          storage of this list, whose size is the number of elements. When the elements move
      *          again, the storage they leave forwards to the new one as well (so that its iterators
      *          fail), and this list to the new one directly.
-     *   cap    the capacity, written by the VM at allocation and never changed; a long, so that no
-     *          two adjacent hot fields have the same size (see the VM layout comment)
+     *   cap    the capacity, written by the VM at allocation and never changed. Read with fwd as one
+     *          8-byte word where they fill one (capAndForward), so that no two adjacent hot fields
+     *          are loaded with the same size (see the VM layout comment); not final, as the word
+     *          covers fwd, which changes
      *   fwd    the storage of a list that forwards, else null. A field rather than slot 0: element
      *          stores and slot 0 share one C2 alias class, so that every element store would make C2
      *          load slot 0, and the size of the storage, again (design B P0: an add to a list that
-     *          forwards took 3.4 times ArrayList's cycles). It moves the elements from offset 24 to 32.
+     *          forwards took 3.4 times ArrayList's cycles); and slot 0 may hold an element that a
+     *          racing change wrote, so that a list read from it would need a class check on every
+     *          access (slot 0 with a C2 load of its own: grow16 1.09 and a forwarded getm-m4k 1.09
+     *          times ArrayList's cycles, against 0.93 and 1.00 here). With cap an int, fwd takes the
+     *          4 bytes after it, and the elements start at 24 (with compressed oops and class
+     *          pointers), as without fwd.
      *          Written only through Unsafe, like the slots and SwissTableBuffer.aux: the collectors
      *          scan objects of this kind only within dirty cards (oopDesc::is_marked_precisely), and a
      *          putfield from compiled code marks the card of the object start, which need not hold
@@ -114,7 +139,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * access a slot outside [0, cap).
      */
     private transient int size;
-    private final transient long cap;
+    private transient int cap;
     private transient FastArrayList<E> fwd;
 
     private FastArrayList() {
@@ -191,8 +216,8 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * that no copy reaches outside a list whatever its caller computed.
      */
     private static void copySlots(FastArrayList<?> src, int srcPos, FastArrayList<?> dst, int dstPos, int n) {
-        Preconditions.checkFromIndexSize(srcPos, n, (int) src.cap, Preconditions.AIOOBE_FORMATTER);
-        Preconditions.checkFromIndexSize(dstPos, n, (int) dst.cap, Preconditions.AIOOBE_FORMATTER);
+        Preconditions.checkFromIndexSize(srcPos, n, capOf(src), Preconditions.AIOOBE_FORMATTER);
+        Preconditions.checkFromIndexSize(dstPos, n, capOf(dst), Preconditions.AIOOBE_FORMATTER);
         copySlots0(src, srcPos, dst, dstPos, n);
     }
 
@@ -226,7 +251,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     @ForceInline
     @SuppressWarnings("unchecked")
     private static <T> FastArrayList<T> copyOfSlots(FastArrayList<?> src, int n, int capacity) {
-        Preconditions.checkFromIndexSize(0, n, (int) src.cap, Preconditions.AIOOBE_FORMATTER);
+        Preconditions.checkFromIndexSize(0, n, capOf(src), Preconditions.AIOOBE_FORMATTER);
         Preconditions.checkFromIndexSize(0, n, capacity, Preconditions.AIOOBE_FORMATTER);
         FastArrayList<T> l = (FastArrayList<T>) allocate(capacity);
         copySlots0(src, 0, l, 0, n);
@@ -245,6 +270,51 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     }
 
     // ---- forwarding --------------------------------------------------------------------------
+
+    /**
+     * The 8 bytes at cap of l (CAP_WORD): cap and, with FWD_IN_WORD, fwd. C2 compiles it to a plain
+     * 8-byte load on the alias class of cap, which only the allocation writes, so that the stores of
+     * sizes and elements do not make C2 load it again; forwardTo writes fwd between two
+     * forwardFence0. Without a control input, so that GVN commons the loads of one list on one
+     * memory state (clear then add: one load). Unsafe.getLong itself would come with barriers in C2
+     * (an access that covers two fields).
+     */
+    @IntrinsicCandidate
+    private static long capWord0(FastArrayList<?> l) {
+        return U.getLong(l, CAP);
+    }
+
+    /** For C2, a barrier to all loads and stores (MemBarCPUOrder); no instruction, nothing here. */
+    @IntrinsicCandidate
+    private static void forwardFence0() {
+    }
+
+    /**
+     * The capacity of l in the low half ((int) of the value), and a high half that is not 0 exactly
+     * when l forwards (fwd is not null): with FWD_IN_WORD one 8-byte load.
+     */
+    @ForceInline
+    private static long capAndForward(FastArrayList<?> l) {
+        if (FWD_IN_WORD) {
+            long w = capWord0(l);
+            return BIG_ENDIAN ? Long.rotateLeft(w, 32) : w;
+        }
+        long c = !CAP_WORD ? l.cap & 0xFFFFFFFFL
+                           : BIG_ENDIAN ? capWord0(l) >>> 32 : capWord0(l) & 0xFFFFFFFFL;
+        return l.fwd != null ? c | (1L << 32) : c;
+    }
+
+    /** Of a value of capAndForward: whether the list forwards. */
+    @ForceInline
+    private static boolean forwardsIn(long cw) {
+        return (cw >>> 32) != 0;
+    }
+
+    /** The capacity of l: the low half of capAndForward. */
+    @ForceInline
+    private static int capOf(FastArrayList<?> l) {
+        return (int) capAndForward(l);
+    }
 
     /**
      * After a read of a negative size of this list: its storage. A plain read: an acquire read of the
@@ -289,9 +359,12 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * reader may see fwd before the size, or n before its contents; n was cleared, and its capacity
      * written, before it could be seen at all (the allocation's own barrier), so it reads null
      * elements or a smaller size, or throws, but stays inside n.
+     * The forwardFence0 before and after these stores keep the loads of capWord0, which C2 does on
+     * the alias class of cap, not of fwd, before or after them, as in the program.
      */
     @ForceInline
     private void forwardTo(FastArrayList<E> t, int s, FastArrayList<E> n) {
+        forwardFence0();
         if (t == this) {
             U.putReference(this, FWD, n);
             size = FORWARDED;
@@ -303,6 +376,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
             U.putReference(t, FWD, n);
             t.size = FORWARDED;
         }
+        forwardFence0();
     }
 
     /**
@@ -310,8 +384,8 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * half, and to at least DEFAULT_CAPACITY from a smaller capacity (as ArrayList's first growth).
      */
     @ForceInline
-    private static int grownCapacity(long cap, int minCapacity) {
-        int old = (int) cap;
+    private static int grownCapacity(int cap, int minCapacity) {
+        int old = cap;
         int c = old < DEFAULT_CAPACITY ? Math.max(DEFAULT_CAPACITY, minCapacity)
                                        : ArraysSupport.newLength(old, minCapacity - old, old >> 1);
         if (c > MAX_CAPACITY) {
@@ -340,7 +414,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      */
     @ForceInline
     public int capacity() {
-        return size >= 0 ? (int) cap : (int) forwardee().cap;
+        return size >= 0 ? capOf(this) : capOf(forwardee());
     }
 
     /**
@@ -457,18 +531,22 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      */
     @Override
     public boolean add(E e) {
-        // Forwarding is tested on fwd, not on the size: every add writes a size (of this list or of
-        // its storage), and both are the one field size for C2, which would therefore load the size
-        // of this list again and test it at every add of a loop; no add writes fwd, so C2 takes the
-        // test out of the loop (P1: an add to a list that forwards took 1.03 times ArrayList's cycles,
-        // 5 instructions more than an add to a list that does not).
-        FastArrayList<E> t = fwd;
-        if (t != null) {
-            t.addHere(e, this);
+        // Forwarding is tested on fwd (in the word of cap, capAndForward), not on the size: every add
+        // writes a size (of this list or of its storage), and both are the one field size for C2,
+        // which would therefore load the size of this list again and test it at every add of a loop;
+        // no add writes fwd or cap, so C2 takes the test out of the loop (P1: an add to a list that
+        // forwards took 1.03 times ArrayList's cycles, 5 instructions more than an add to a list that
+        // does not).
+        long cw = capAndForward(this);
+        if (forwardsIn(cw)) {
+            forwardee().addHere(e, this);
             return true;
         }
         int s = size;
-        if ((s & 0xFFFFFFFFL) >= cap) {         // full, or a negative size read while a racing move
+        // one unsigned 32-bit compare against the low half of the word (cap): a long compare of the
+        // size zero-extended took a sign extension and a mask more per add, beside the sign extension
+        // that the slot address takes (grow16: 3 instructions per add more than F7)
+        if (!inBounds(s, (int) cw)) {           // full, or a negative size read while a racing move
             addToLarger(e);                     // has not written fwd yet
             return true;
         }
@@ -484,7 +562,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     @ForceInline
     private void addHere(E e, FastArrayList<E> list) {
         int s = size;
-        if ((s & 0xFFFFFFFFL) < cap) {
+        if (inBounds(s, (int) capAndForward(this))) {         // as in add(E)
             put(s, e);
             size = s + 1;
             return;
@@ -497,12 +575,13 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     private void addToLarger(E e) {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
-        if (s < t.cap) {                        // a racing change made room
+        int c = capOf(t);
+        if (s < c) {                            // a racing change made room
             t.put(s, e);
             t.size = s + 1;
             return;
         }
-        FastArrayList<E> n = copyOfSlots(t, s, grownCapacity(t.cap, s + 1));
+        FastArrayList<E> n = copyOfSlots(t, s, grownCapacity(c, s + 1));
         n.put(s, e);
         n.size = s + 1;
         forwardTo(t, s, n);
@@ -521,12 +600,13 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
         Objects.checkIndex(index, s + 1);
-        if (s < t.cap) {
+        int c = capOf(t);
+        if (s < c) {
             copySlots(t, index, t, index + 1, s - index);
             t.put(index, element);
             t.size = s + 1;
         } else {
-            FastArrayList<E> n = copyOfSlots(t, index, grownCapacity(t.cap, s + 1));
+            FastArrayList<E> n = copyOfSlots(t, index, grownCapacity(c, s + 1));
             copySlots(t, index, n, index + 1, s - index);
             n.put(index, element);
             n.size = s + 1;
@@ -550,7 +630,8 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         if (a.length == 0) {
             return false;
         }
-        if (a.length <= t.cap - s) {
+        int capT = capOf(t);
+        if (a.length <= capT - s) {
             for (int i = 0; i < a.length; i++) {
                 t.put(s + i, a[i]);
             }
@@ -559,7 +640,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
             if (a.length > MAX_CAPACITY - s) {
                 throw new OutOfMemoryError("Required FastArrayList capacity " + ((long) s + a.length) + " is too large");
             }
-            FastArrayList<E> n = copyOfSlots(t, s, grownCapacity(t.cap, s + a.length));
+            FastArrayList<E> n = copyOfSlots(t, s, grownCapacity(capT, s + a.length));
             for (int i = 0; i < a.length; i++) {
                 n.put(s + i, a[i]);
             }
@@ -590,7 +671,8 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         if (n == 0) {
             return false;
         }
-        if (n <= t.cap - s) {
+        int capT = capOf(t);
+        if (n <= capT - s) {
             copySlots(t, index, t, index + n, s - index);
             for (int i = 0; i < n; i++) {
                 t.put(index + i, a[i]);
@@ -600,7 +682,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
             if (n > MAX_CAPACITY - s) {
                 throw new OutOfMemoryError("Required FastArrayList capacity " + ((long) s + n) + " is too large");
             }
-            FastArrayList<E> m = copyOfSlots(t, index, grownCapacity(t.cap, s + n));
+            FastArrayList<E> m = copyOfSlots(t, index, grownCapacity(capT, s + n));
             copySlots(t, index, m, index + n, s - index);
             for (int i = 0; i < n; i++) {
                 m.put(index + i, a[i]);
@@ -620,8 +702,9 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     public void ensureCapacity(int minCapacity) {
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
-        if (minCapacity > t.cap) {
-            forwardTo(t, s, copyOfSlots(t, s, grownCapacity(t.cap, minCapacity)));
+        int c = capOf(t);
+        if (minCapacity > c) {
+            forwardTo(t, s, copyOfSlots(t, s, grownCapacity(c, minCapacity)));
         }
     }
 
@@ -634,7 +717,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         FastArrayList<E> t = storage();
         int s = sizeOf(t);
         int c = Math.max(s, 1);
-        if (c != t.cap) {
+        if (c != capOf(t)) {
             forwardTo(t, s, copyOfSlots(t, s, c));
         }
     }
@@ -710,9 +793,8 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      */
     @Override
     public void clear() {
-        FastArrayList<E> t = fwd;               // tested on fwd, as in add(E)
-        if (t != null) {
-            t.clearHere();
+        if (forwardsIn(capAndForward(this))) {  // tested on fwd, as in add(E)
+            forwardee().clearHere();
             return;
         }
         int s = sizeOf(this);

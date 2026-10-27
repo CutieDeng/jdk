@@ -63,18 +63,23 @@ class MemRegion;
                    | object header                  |
                    | declared fields:               |
                    |   int size                     |  -1 once the list was replaced by a larger one
-                   |   long cap                     |  the capacity, never changed
+                   |   int cap                      |  the capacity, never changed
+                   |   FastArrayList fwd            |  the list that replaced it, else null
                    +================================+  data_base: the instance size of the class
-                   | elements                       |  (8 more without compressed oops, see below)
-                   |                                |  cap heap oops
+                   | elements                       |  cap heap oops
+                   |                                |
                    +--------------------------------+  data_base + cap * heapOopSize, rounded up to
                                                        the object alignment
 
  cap is any value from 0 to max_capacity(). No two hot locations of one access size are adjacent
  (size, cap, element 0): the MacroAssembler merges adjacent loads or stores of one size into
  ldp/stp, and a load pair that an older 4-byte store covers only in part cannot take its data from
- the store (Kunpeng 920: 13 instead of 8 cycles per dependent step). Without compressed oops
- element 0 would follow cap with the same size, so the elements start 8 bytes later.
+ the store (Kunpeng 920: 13 instead of 8 cycles per dependent step). When cap starts an aligned
+ 8-byte word (with compressed class pointers: size at 12, cap at 16, and with compressed oops fwd
+ at 20, so that the elements start at 24), the Java code reads cap only as that word, with fwd
+ when fwd is its other half (FastArrayList.capWord0): then neither cap nor fwd is loaded on its own
+ next to size or element 0, but fwd of a list that forwards, whose elements are unused. Otherwise
+ element 0 does not follow a 4-byte size or cap.
 
  The garbage collectors visit the declared reference fields and the trailing references; the
  primitive bytes are not references. The capacity is written before the klass is published, so the

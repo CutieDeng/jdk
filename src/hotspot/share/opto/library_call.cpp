@@ -507,6 +507,8 @@ bool LibraryCallKit::try_to_inline(int predicate) {
   case vmIntrinsics::_swissTableBufferAllocate:       return inline_swiss_table_buffer_allocate(false);
   case vmIntrinsics::_fastArrayListAllocate:          return inline_swiss_table_buffer_allocate(true);
   case vmIntrinsics::_fastArrayListCopySlots:         return inline_fast_list_copy_slots();
+  case vmIntrinsics::_fastArrayListCapWord:           return inline_fast_list_cap_word();
+  case vmIntrinsics::_fastArrayListForwardFence:      return inline_fast_list_forward_fence();
   case vmIntrinsics::_swissMatchTag:            return inline_swiss_match_tag(false);
   case vmIntrinsics::_swissFirstTagLane:        return inline_swiss_match_tag(true);
   case vmIntrinsics::_copyMemory:               return inline_unsafe_copyMemory();
@@ -2983,6 +2985,46 @@ bool LibraryCallKit::inline_fast_list_copy_slots() {
                     StubRoutines::oop_arraycopy(), "oop_arraycopy",
                     adr_type,
                     src_start, dst_start, ConvI2X(n) XTOP);
+  return true;
+}
+
+//------------------------inline_fast_list_cap_word------------------------------
+// java.util.FastArrayList.capWord0(FastArrayList l): the 8 bytes at the cap field of l, which hold
+// cap and fwd when the Java code calls it (FastArrayList.CAP_WORD). A plain LoadL, marked
+// mismatched (it covers two int-sized fields): the Java code, Unsafe.getLong, would get barriers
+// around it in C2 (C2Access::needs_cpu_membar). Its alias class is that of cap, which only the
+// allocation writes, so that the stores of sizes and elements do not make C2 load it again; the
+// stores of fwd are between two forwardFence0 (MemBarCPUOrder), which order it against them.
+// No control input: the address is within the declared fields of l, after its null check (a cast
+// pinned there unless l is known not null), so that the load is valid wherever its inputs are
+// (C2Access::fixup_decorators unpins constant-offset Unsafe loads within an object for the same
+// reason). With a control input GVN commons two loads of one list on one memory state only if one
+// control dominates the other through a few steps without a merge (LoadNode::Ideal); without it
+// they are one node (clear then add: one load).
+bool LibraryCallKit::inline_fast_list_cap_word() {
+  ciInstanceKlass* ik = C->env()->FastArrayList_klass();
+  const int cap_offset = InstanceSwissTableBufferKlass::fast_list_layout().capacity_offset;
+  if (ik == nullptr || !ik->is_loaded() || !is_aligned(cap_offset, BytesPerLong)) {
+    return false;
+  }
+  Node* l = null_check(argument(0));
+  if (stopped()) {
+    return true;
+  }
+  Node* adr = basic_plus_adr(l, cap_offset);
+  const TypePtr* adr_type = _gvn.type(adr)->isa_ptr();
+  set_result(make_load(nullptr, adr, TypeLong::LONG, T_LONG, adr_type, MemNode::unordered,
+                       LoadNode::DependsOnlyOnTest, false /* require_atomic_access */,
+                       false /* unaligned */, true /* mismatched */));
+  return true;
+}
+
+//------------------------inline_fast_list_forward_fence-------------------------
+// java.util.FastArrayList.forwardFence0(): a MemBarCPUOrder, before and after the stores of
+// forwardTo, so that the loads of capWord0, whose alias class (cap) does not cover fwd, that come
+// before those stores stay before them and those that come after stay after them. No instruction.
+bool LibraryCallKit::inline_fast_list_forward_fence() {
+  insert_mem_bar(Op_MemBarCPUOrder);
   return true;
 }
 
