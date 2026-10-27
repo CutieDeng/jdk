@@ -112,6 +112,7 @@ private:
   static const Klass* _fast_list_klass;     // set by init_offsets
   static int _aux_offset;                   // SwissTableBuffer.aux
   static int _fast_list_size_offset;        // FastArrayList.size
+  static int _fast_list_fwd_offset;         // FastArrayList.fwd
 
   InstanceSwissTableBufferKlass(const ClassFileParser& parser);
 
@@ -136,6 +137,14 @@ public:
   static int capacity_offset() { return _swiss.capacity_offset; }   // SwissTableBuffer.capacity
   static int aux_offset() { return _aux_offset; }
   static int fast_list_size_offset() { return _fast_list_size_offset; }
+  static int fast_list_fwd_offset() { return _fast_list_fwd_offset; }
+  static const Klass* fast_list_klass() { return _fast_list_klass; }
+  // Sizes of a FastArrayList that does not hold its elements (FastArrayList.FORWARDED, RETIRED): the
+  // list object that forwards to its storage (fwd), which a young collection may fold into the
+  // storage (FastListFolding); and a storage that the elements left, which forwards too but is not
+  // folded (only stale iterators reach it, and they must fail).
+  static const jint fast_list_forwarded = -1;
+  static const jint fast_list_retired   = -2;
 
   // Byte offset of the control bytes of a SwissTableBuffer: the instance size of the class.
   int ctrl_base_in_bytes() const { return size_helper() << LogHeapWordSize; }

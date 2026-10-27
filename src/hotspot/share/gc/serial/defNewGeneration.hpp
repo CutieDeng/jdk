@@ -276,6 +276,13 @@ class DefNewGeneration: public Generation {
   oop copy_to_survivor_space(oop old);
   uint tenuring_threshold() { return _tenuring_threshold; }
 
+ private:
+  // A java.util.FastArrayList that forwards, folded into its storage (FastArrayListFolding): the
+  // new location of the storage, which old now forwards to; or null to copy old as usual.
+  oop fold_fast_list(oop old);
+
+ public:
+
   // Performance Counter support
   void update_counters();
 

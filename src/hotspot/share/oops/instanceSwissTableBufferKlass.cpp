@@ -42,6 +42,7 @@ InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_fast_list 
 const Klass* InstanceSwissTableBufferKlass::_fast_list_klass = nullptr;
 int InstanceSwissTableBufferKlass::_aux_offset = -1;
 int InstanceSwissTableBufferKlass::_fast_list_size_offset = -1;
+int InstanceSwissTableBufferKlass::_fast_list_fwd_offset = -1;
 
 InstanceSwissTableBufferKlass::InstanceSwissTableBufferKlass(const ClassFileParser& parser)
   : InstanceKlass(parser, Kind) {
@@ -74,6 +75,11 @@ void InstanceSwissTableBufferKlass::init_offsets() {
                                               "java.util.FastArrayList must declare int size");
   _fast_list.capacity_offset = local_field_offset(f, "cap", vmSymbols::int_signature(),
                                                   "java.util.FastArrayList must declare int cap");
+  {
+    TempNewSymbol list_signature = SymbolTable::new_symbol("Ljava/util/FastArrayList;");
+    _fast_list_fwd_offset = local_field_offset(f, "fwd", list_signature,
+                                               "java.util.FastArrayList must declare FastArrayList fwd");
+  }
   // The elements follow the declared fields. Element 0 must not be adjacent to a field of its own
   // size that is loaded on its own (see the class comment): size; cap unless it starts an aligned
   // word, which the Java code then reads at once (with fwd, when fwd is the other half).

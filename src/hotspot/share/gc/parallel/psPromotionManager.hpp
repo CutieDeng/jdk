@@ -114,6 +114,12 @@ class PSPromotionManager {
   template<bool promote_immediately>
   oop copy_unmarked_to_survivor_space(oop o, markWord m);
 
+  // A java.util.FastArrayList that forwards, folded into its storage (FastArrayListFolding): the
+  // location of the storage that o now forwards to (or the forwardee another thread installed); or
+  // null to copy o as usual.
+  template<bool promote_immediately>
+  oop fold_fast_list(oop o, markWord test_mark, oop storage);
+
  public:
   // Static
   static void initialize();

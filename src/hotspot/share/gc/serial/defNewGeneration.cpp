@@ -33,6 +33,7 @@
 #include "gc/shared/ageTable.inline.hpp"
 #include "gc/shared/collectorCounters.hpp"
 #include "gc/shared/continuationGCSupport.inline.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/gcArguments.hpp"
 #include "gc/shared/gcHeapSummary.hpp"
 #include "gc/shared/gcLocker.hpp"
@@ -860,6 +861,8 @@ void DefNewGeneration::collect(bool   full,
   // We should have processed and cleared all the preserved marks.
   _preserved_marks_set.reclaim();
 
+  FastArrayListFolding::report("DefNew");
+
   heap->trace_heap_after_gc(_gc_tracer);
 
   _gc_timer->register_gc_end();
@@ -918,10 +921,39 @@ void DefNewGeneration::handle_promotion_failure(oop old) {
   }
 }
 
+oop DefNewGeneration::fold_fast_list(oop old) {
+  const markWord m = old->mark();
+  oop storage = FastArrayListFolding::storage_to_fold(old, m);
+  if (storage == nullptr) {
+    return nullptr;
+  }
+  oop target = storage;
+  if (is_in_reserved(storage)) {
+    target = storage->is_forwarded() ? storage->forwardee() : copy_to_survivor_space(storage);
+    if (target == storage) {
+      return nullptr;                   // the promotion of the storage failed: it stays in place
+    }
+  }
+  if (!FastArrayListFolding::can_take_identity(m, target)) {
+    return nullptr;
+  }
+  FastArrayListFolding::transfer_hash(m, target);
+  old->forward_to(target);
+  FastArrayListFolding::count_fold();
+  return target;
+}
+
 oop DefNewGeneration::copy_to_survivor_space(oop old) {
   assert(is_in_reserved(old) && !old->is_forwarded(),
          "shouldn't be scavenging this oop");
-  size_t s = old->size();
+  Klass* const k = old->klass();
+  if (FastArrayListFolding::is_candidate(old, k)) {
+    oop folded = fold_fast_list(old);
+    if (folded != nullptr) {
+      return folded;
+    }
+  }
+  size_t s = old->size_given_klass(k);
   oop obj = nullptr;
 
   // Try allocating obj in to-space (unless too old)

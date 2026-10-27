@@ -35,6 +35,7 @@
 #include "gc/parallel/psPromotionManager.inline.hpp"
 #include "gc/parallel/psRootType.hpp"
 #include "gc/parallel/psScavenge.inline.hpp"
+#include "gc/shared/fastArrayListFolding.hpp"
 #include "gc/shared/gcCause.hpp"
 #include "gc/shared/gcHeapSummary.hpp"
 #include "gc/shared/gcId.hpp"
@@ -664,6 +665,8 @@ bool PSScavenge::invoke_no_policy() {
   if (VerifyAfterGC && heap->total_collections() >= VerifyGCStartAt) {
     Universe::verify("After GC");
   }
+
+  FastArrayListFolding::report("PSScavenge");
 
   heap->print_heap_after_gc();
   heap->trace_heap_after_gc(&_gc_tracer);

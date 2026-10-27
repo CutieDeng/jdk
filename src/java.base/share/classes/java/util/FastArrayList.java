@@ -47,7 +47,10 @@ import jdk.internal.vm.annotation.IntrinsicCandidate;
  * is allocated, and is at least 1. When a change needs another capacity (an addition to a full
  * list, {@link #ensureCapacity(int)}, {@link #trimToSize()}), the elements move to a new list object
  * of that capacity, and the list forwards to it: the list keeps its identity, every reference to it
- * stays valid, and it reaches its elements through one more reference.
+ * stays valid, and it reaches its elements through one more reference. The young collections of
+ * the Serial and Parallel collectors fold a young list that forwards into the list object that holds
+ * its elements, which then is the list (same identity, identity hash included): its elements are
+ * one reference away again.
  *
  * <p>There is no modification count. Iterators, list iterators and sublists fail fast: they throw
  * {@link ConcurrentModificationException} when the size changed after they were created, other
@@ -71,8 +74,17 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     private static final int REF_SHIFT = Unsafe.ARRAY_OBJECT_INDEX_SCALE == 4 ? 2 : 3;
     /** The capacity of a larger list that replaces a list of smaller capacity, at least. */
     private static final int DEFAULT_CAPACITY = 10;
-    /** The size of a list that forwards to another list object, its storage (fwd). */
+    /**
+     * The size of a list that forwards to another list object, its storage (fwd); a young collection
+     * may fold it into the storage (InstanceSwissTableBufferKlass::fast_list_forwarded).
+     */
     private static final int FORWARDED = -1;
+    /**
+     * The size of a storage that the elements left: it forwards to their new storage (fwd), so that
+     * its iterators fail, and is never folded, so that they still fail after a collection
+     * (InstanceSwissTableBufferKlass::fast_list_retired).
+     */
+    private static final int RETIRED = -2;
 
     /** Byte offset of element 0. */
     private static final long DATA_BASE;
@@ -110,8 +122,10 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * Instance state. The VM lays the elements out after these fields (InstanceSwissTableBufferKlass):
      *   size   number of elements; or FORWARDED: the elements are in the list object fwd, the
      *          storage of this list, whose size is the number of elements. When the elements move
-     *          again, the storage they leave forwards to the new one as well (so that its iterators
-     *          fail), and this list to the new one directly.
+     *          again, the storage they leave forwards to the new one as well (RETIRED, so that its
+     *          iterators fail), and this list to the new one directly. A young collection of Serial
+     *          or Parallel may fold a list that forwards: every reference to it then refers to (the
+     *          copy of) its storage, which is the list from then on (FastArrayListFolding in the VM).
      *   cap    the capacity, written by the VM at allocation and never changed. Read with fwd as one
      *          8-byte word where they fill one (capAndForward), so that no two adjacent hot fields
      *          are loaded with the same size (see the VM layout comment); not final, as the word
@@ -325,7 +339,18 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      */
     @ForceInline
     private FastArrayList<E> forwardee() {
-        return fwd;
+        FastArrayList<E> t = fwd;
+        if (t == null) {
+            // This list does not forward (any more): a young collection folded the list object that
+            // forwarded into its storage, which this object is, after the caller had tested the
+            // forwarding state (compiled code may keep that test in a register across a safepoint);
+            // or a racing move had written the size before fwd. The list itself holds the elements,
+            // or its negative size makes the caller throw. Taken only after a fold or in a race:
+            // with a profile that never took it, C2 makes it an uncommon trap, which it can turn
+            // into an implicit null check of the access that follows.
+            t = this;
+        }
+        return t;
     }
 
     /** The list object that holds the elements: this one, or its storage. */
@@ -352,7 +377,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * Makes this list forward to n, which holds the elements now; they were copied from t, this list
      * or its storage, which had s elements. The first time, fwd gets n and the size becomes FORWARDED,
      * then the slots are cleared, so that they do not keep elements alive; later, fwd gets n, and t,
-     * which the elements left, forwards to n too, so that its iterators fail.
+     * which the elements left, forwards to n too and becomes RETIRED, so that its iterators fail.
      * Plain stores: readers do not read fwd with acquire (forwardee), so release stores here would
      * not order anything for a racing reader, and on Kunpeng 920 a release store after the copy
      * waits for its stores (as a store-store barrier after a copy does; see copyOfSlots). A racing
@@ -374,7 +399,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         } else {
             U.putReference(this, FWD, n);
             U.putReference(t, FWD, n);
-            t.size = FORWARDED;
+            t.size = RETIRED;
         }
         forwardFence0();
     }
@@ -911,7 +936,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
                 dead[i >>> 6] |= 1L << i;
             }
         }
-        if (t.size != s) {                         // a move marks t FORWARDED
+        if (t.size != s) {                         // a move marks t FORWARDED or RETIRED
             throw new ConcurrentModificationException();
         }
         if (dead == null) {
@@ -1047,7 +1072,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         for (int i = 0; i < s && t.size == s; i++) {
             action.accept(t.at(i));
         }
-        if (t.size != s) {                         // a move marks t FORWARDED
+        if (t.size != s) {                         // a move marks t FORWARDED or RETIRED
             throw new ConcurrentModificationException();
         }
     }
@@ -1092,7 +1117,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     /**
      * An iterator over the list object that holds the elements when it is made: this list, or its
      * storage. It fails when the size of that object changes, which a move of the elements does as
-     * well (forwardTo marks the object they leave FORWARDED).
+     * well (forwardTo marks the object they leave FORWARDED or RETIRED).
      */
     private class Itr implements Iterator<E> {
         FastArrayList<E> list;
@@ -1113,7 +1138,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
 
         @Override
         public boolean hasNext() {
-            // as ArrayList's: a changed size (FORWARDED included) makes the next call of next() throw
+            // as ArrayList's: a changed size (FORWARDED or RETIRED included) makes next() throw
             return cursor != list.size;
         }
 

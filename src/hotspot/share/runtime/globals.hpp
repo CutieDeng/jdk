@@ -180,6 +180,11 @@ const int ObjectAlignmentInBytes = 8;
           "control bytes, SIMD group probing); getClass() still "           \
           "reports HashMap")                                                \
                                                                             \
+  product(bool, FastListFolding, true, DIAGNOSTIC,                          \
+          "Young collections of Serial and Parallel replace a "            \
+          "java.util.FastArrayList that forwards to its storage by the "   \
+          "storage, which then holds its identity")                        \
+                                                                            \
   product(bool, UnlockDiagnosticVMOptions, trueInDebug, DIAGNOSTIC,         \
           "Enable normal processing of flags relating to field diagnostics")\
                                                                             \

@@ -34,6 +34,7 @@
 #include "gc/parallel/psScavenge.inline.hpp"
 #include "gc/parallel/psStringDedup.hpp"
 #include "gc/shared/continuationGCSupport.inline.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/taskqueue.inline.hpp"
 #include "gc/shared/tlab_globals.hpp"
 #include "logging/log.hpp"
@@ -156,6 +157,38 @@ inline oop PSPromotionManager::copy_to_survivor_space(oop o) {
   }
 }
 
+// Every thread that copies o comes to the same decision: the state of o and of its storage does
+// not change during the collection. The thread whose forwarding of o succeeds counts the fold.
+// The identity hash of o goes to the storage only where no other thread writes the mark of the
+// storage: when it is old. A young storage may be copied by another thread, which increments the
+// age in the mark of its copy after it forwarded the storage (without a CAS), so that a hashed o with
+// a young storage is copied as usual (it folds when its storage is old, or in no young collection).
+template<bool promote_immediately>
+inline oop PSPromotionManager::fold_fast_list(oop o, markWord test_mark, oop storage) {
+  oop target = storage;
+  if (PSScavenge::is_obj_in_young(storage)) {
+    if (!test_mark.has_no_hash()) {
+      return nullptr;
+    }
+    target = copy_to_survivor_space<promote_immediately>(storage);
+    if (target == storage) {
+      return nullptr;                   // the promotion of the storage failed: it stays in place
+    }
+  }
+  if (!FastArrayListFolding::can_take_identity(test_mark, target)) {
+    return nullptr;
+  }
+  // Release: the copy of the storage, which this thread acquired or made, before the forwardee.
+  oop forwardee = o->forward_to_atomic(target, test_mark, memory_order_release);
+  if (forwardee != nullptr) {
+    OrderAccess::acquire();
+    return forwardee;                   // another thread forwarded o (folded it as well)
+  }
+  FastArrayListFolding::transfer_hash(test_mark, target);   // target is old here if o has a hash
+  FastArrayListFolding::count_fold();
+  return target;
+}
+
 //
 // This method is pretty bulky. It would be nice to split it up
 // into smaller submethods, but we need to be careful not to hurt
@@ -166,9 +199,20 @@ inline oop PSPromotionManager::copy_unmarked_to_survivor_space(oop o,
                                                                markWord test_mark) {
   assert(should_scavenge(&o), "Sanity");
 
+  Klass* const k = o->klass();
+  if (FastArrayListFolding::is_candidate(o, k)) {
+    oop storage = FastArrayListFolding::storage_to_fold(o, test_mark);
+    if (storage != nullptr) {
+      oop folded = fold_fast_list<promote_immediately>(o, test_mark, storage);
+      if (folded != nullptr) {
+        return folded;
+      }
+    }
+  }
+
   oop new_obj = nullptr;
   bool new_obj_is_tenured = false;
-  size_t new_obj_size = o->size();
+  size_t new_obj_size = o->size_given_klass(k);
 
   // Find the objects age, MT safe.
   uint age = (test_mark.has_displaced_mark_helper() /* o->has_displaced_mark() */) ?
