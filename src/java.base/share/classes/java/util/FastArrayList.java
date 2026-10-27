@@ -457,13 +457,19 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      */
     @Override
     public boolean add(E e) {
-        int s = size;
-        if (s < 0) {                            // forwarding: the sign test first, so that this path
-            forwardee().addHere(e, this);       // skips the comparison with the cap of this list
+        // Forwarding is tested on fwd, not on the size: every add writes a size (of this list or of
+        // its storage), and both are the one field size for C2, which would therefore load the size
+        // of this list again and test it at every add of a loop; no add writes fwd, so C2 takes the
+        // test out of the loop (P1: an add to a list that forwards took 1.03 times ArrayList's cycles,
+        // 5 instructions more than an add to a list that does not).
+        FastArrayList<E> t = fwd;
+        if (t != null) {
+            t.addHere(e, this);
             return true;
         }
-        if (s >= cap) {
-            addToLarger(e);
+        int s = size;
+        if ((s & 0xFFFFFFFFL) >= cap) {         // full, or a negative size read while a racing move
+            addToLarger(e);                     // has not written fwd yet
             return true;
         }
         put(s, e);
@@ -704,11 +710,12 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      */
     @Override
     public void clear() {
-        int s = size;
-        if (s < 0) {
-            forwardee().clearHere();
+        FastArrayList<E> t = fwd;               // tested on fwd, as in add(E)
+        if (t != null) {
+            t.clearHere();
             return;
         }
+        int s = sizeOf(this);
         for (int i = 0; i < s; i++) {
             put(i, null);
         }
