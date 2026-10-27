@@ -651,15 +651,15 @@ Block* PhaseCFG::insert_anti_dependences(Block* LCA, Node* load, bool verify) {
   // We don't optimize the memory graph for pinned loads, so we may need to raise the
   // root of our search tree through the corresponding slices of MergeMem nodes to
   // get to the node that really creates the memory state for this slice.
+  // That includes a slice that is the base memory of the MergeMem: a store of the slice
+  // may take the base memory directly rather than through this MergeMem (for example
+  // after a G1 pre-barrier, whose IdealKit merge leaves the slice at the base memory), so
+  // the search must start at the base memory, whose users include this MergeMem.
+  // Stopping at the MergeMem missed such stores: a pinned Unsafe load of an element of a
+  // java.util.FastArrayList was scheduled after the store of the same element (StressLCM).
   if (load_alias_idx >= Compile::AliasIdxRaw) {
     while (initial_mem->is_MergeMem()) {
-      MergeMemNode* mm = initial_mem->as_MergeMem();
-      Node* p = mm->memory_at(load_alias_idx);
-      if (p != mm->base_memory()) {
-        initial_mem = p;
-      } else {
-        break;
-      }
+      initial_mem = initial_mem->as_MergeMem()->memory_at(load_alias_idx);
     }
   }
   worklist_store.push(initial_mem);

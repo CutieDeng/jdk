@@ -339,10 +339,19 @@ void PhaseCFG::implicit_null_check(Block* block, Node *proj, Node *val, int allo
        assert(get_block_for_node(mb->pred(1)) == block, "Unexpected predecessor block");
        uint k;
        uint num_nodes = mb->number_of_nodes();
+       // A pinned load may still read a MergeMem (LoadNode::Ideal leaves pinned loads alone):
+       // compare the memory state of its slice, the slice of the store
+       const int store_alias_idx = C->get_alias_index(mach->adr_type());
        for (k = 1; k < num_nodes; k++) {
          Node *n = mb->get_node(k);
-         if (n->needs_anti_dependence_check() &&
-             n->in(LoadNode::Memory) == mach->in(StoreNode::Memory)) {
+         if (!n->needs_anti_dependence_check()) {
+           continue;
+         }
+         Node* n_mem = n->in(LoadNode::Memory);
+         while (n_mem != nullptr && n_mem->is_MergeMem() && store_alias_idx >= Compile::AliasIdxRaw) {
+           n_mem = n_mem->as_MergeMem()->memory_at(store_alias_idx);
+         }
+         if (n->in(LoadNode::Memory) == mach->in(StoreNode::Memory) || n_mem == mach->in(StoreNode::Memory)) {
            break;              // Found anti-dependent load
          }
        }
