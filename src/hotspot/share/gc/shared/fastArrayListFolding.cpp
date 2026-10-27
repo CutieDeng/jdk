@@ -22,7 +22,7 @@
  */
 
 #include "precompiled.hpp"
-#include "gc/shared/fastArrayListFolding.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "logging/log.hpp"
 #include "runtime/atomic.hpp"
 
@@ -37,4 +37,64 @@ void FastArrayListFolding::report(const char* collection) {
   if (folds != 0) {
     log_debug(gc)("%s: folded %zu java.util.FastArrayList", collection, folds);
   }
+}
+
+GrowableArray<FastArrayListFolding::SerialFold>* FastArrayListFolding::_serial_full_folds = nullptr;
+
+// Phase 1 of a Serial full collection, for an object just marked (its mark is now the marked
+// prototype; mark is the one it had). A hashed list moves its hash through its preserved mark,
+// so that its storage must not have another one: that is known only while the storage is not
+// marked yet (marking replaces its mark).
+void FastArrayListFolding::serial_full_mark(oop obj, markWord mark) {
+  oop storage = storage_to_fold(obj, mark);
+  if (storage == nullptr) {
+    return;
+  }
+  if (storage->is_gc_marked()) {
+    if (!mark.has_no_hash()) {
+      return;
+    }
+  } else if (!can_take_identity(mark, storage)) {
+    return;
+  }
+  set_size(obj, InstanceSwissTableBufferKlass::fast_list_folding);
+}
+
+// Phase 2: obj gets no space; it is forwarded to its storage once the storage has its new address.
+void FastArrayListFolding::serial_full_record(oop obj, size_t size) {
+  if (_serial_full_folds == nullptr) {
+    _serial_full_folds = new (mtGC) GrowableArray<SerialFold>(64, mtGC);
+  }
+  SerialFold f = { obj, size };
+  _serial_full_folds->append(f);
+}
+
+// After phase 2: forward every folded list to the new address of its storage (the storage itself
+// if it does not move: then its mark is the prototype, not a forwarding pointer), so that phase 3
+// adjusts every reference to the list.
+void FastArrayListFolding::serial_full_forward() {
+  if (_serial_full_folds == nullptr) {
+    return;
+  }
+  for (int i = 0; i < _serial_full_folds->length(); i++) {
+    oop list = _serial_full_folds->at(i).list;
+    oop storage = storage_of(list);
+    oop target = storage->is_forwarded() ? storage->forwardee() : storage;
+    list->forward_to(target);
+    count_fold();
+  }
+}
+
+// After phase 3: make every folded list a dead object for phase 4, which reads the first word of
+// a dead object as the address of the next object to look at (ContiguousSpace::compact).
+void FastArrayListFolding::serial_full_make_dead() {
+  if (_serial_full_folds == nullptr) {
+    return;
+  }
+  for (int i = 0; i < _serial_full_folds->length(); i++) {
+    const SerialFold& f = _serial_full_folds->at(i);
+    HeapWord* start = cast_from_oop<HeapWord*>(f.list);
+    *(HeapWord**)start = start + f.size;
+  }
+  _serial_full_folds->clear();
 }

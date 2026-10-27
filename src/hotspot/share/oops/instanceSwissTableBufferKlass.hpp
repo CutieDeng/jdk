@@ -145,6 +145,10 @@ public:
   // folded (only stale iterators reach it, and they must fail).
   static const jint fast_list_forwarded = -1;
   static const jint fast_list_retired   = -2;
+  // The size a full collection writes into a list object that forwards and that it folds
+  // (FastArrayListFolding): from phase 1, which decides it, to phase 2, which gives the object no
+  // space. The object is unreachable after the collection.
+  static const jint fast_list_folding   = -3;
 
   // Byte offset of the control bytes of a SwissTableBuffer: the instance size of the class.
   int ctrl_base_in_bytes() const { return size_helper() << LogHeapWordSize; }

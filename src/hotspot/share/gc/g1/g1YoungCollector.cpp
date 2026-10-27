@@ -48,6 +48,7 @@
 #include "gc/g1/g1YoungGCPreEvacuateTasks.hpp"
 #include "gc/g1/g1_globals.hpp"
 #include "gc/shared/concurrentGCBreakpoints.hpp"
+#include "gc/shared/fastArrayListFolding.hpp"
 #include "gc/shared/gcTraceTime.inline.hpp"
 #include "gc/shared/gcTimer.hpp"
 #include "gc/shared/preservedMarks.hpp"
@@ -1072,6 +1073,7 @@ void G1YoungCollector::collect() {
       evacuate_optional_collection_set(&per_thread_states);
     }
     post_evacuate_collection_set(jtm.evacuation_info(), &per_thread_states);
+    FastArrayListFolding::report("G1 Young");
 
     // Refine the type of a concurrent mark operation now that we did the
     // evacuation, eventually aborting it.

@@ -91,9 +91,10 @@ private:
 
   class G1PrepareCompactLiveClosure : public StackObj {
     G1FullGCCompactionPoint* _cp;
+    G1CMBitMap* _bitmap;
 
   public:
-    G1PrepareCompactLiveClosure(G1FullGCCompactionPoint* cp);
+    G1PrepareCompactLiveClosure(G1FullGCCompactionPoint* cp, G1CMBitMap* bitmap);
     size_t apply(oop object);
   };
 };

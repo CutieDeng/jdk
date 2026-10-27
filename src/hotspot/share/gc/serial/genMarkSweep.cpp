@@ -35,6 +35,7 @@
 #include "gc/serial/cardTableRS.hpp"
 #include "gc/serial/genMarkSweep.hpp"
 #include "gc/serial/serialGcRefProcProxyTask.hpp"
+#include "gc/shared/fastArrayListFolding.hpp"
 #include "gc/shared/classUnloadingContext.hpp"
 #include "gc/shared/collectedHeap.inline.hpp"
 #include "gc/shared/gcHeapSummary.hpp"
@@ -90,6 +91,9 @@ void GenMarkSweep::invoke_at_safepoint(bool clear_all_softrefs) {
 
   mark_sweep_phase2();
 
+  // java.util.FastArrayList that forward, folded: to the new addresses of their storage
+  FastArrayListFolding::serial_full_forward();
+
   // Don't add any more derived pointers during phase3
 #if COMPILER2_OR_JVMCI
   assert(DerivedPointerTable::is_active(), "Sanity");
@@ -98,9 +102,13 @@ void GenMarkSweep::invoke_at_safepoint(bool clear_all_softrefs) {
 
   mark_sweep_phase3();
 
+  FastArrayListFolding::serial_full_make_dead();
+
   mark_sweep_phase4();
 
   restore_marks();
+
+  FastArrayListFolding::report("MarkSweep");
 
   // Set saved marks for allocation profiler (and other things? -- dld)
   // (Should this be in general part?)

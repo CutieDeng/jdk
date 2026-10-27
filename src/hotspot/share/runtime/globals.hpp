@@ -181,9 +181,10 @@ const int ObjectAlignmentInBytes = 8;
           "reports HashMap")                                                \
                                                                             \
   product(bool, FastListFolding, true, DIAGNOSTIC,                          \
-          "Young collections of Serial and Parallel replace a "            \
-          "java.util.FastArrayList that forwards to its storage by the "   \
-          "storage, which then holds its identity")                        \
+          "Collections replace a java.util.FastArrayList that forwards "   \
+          "to its storage by the storage, which then holds its identity: " \
+          "the young collections of Serial, Parallel and G1 (young lists) "\
+          "and the full collections of Serial and G1 (all lists)")         \
                                                                             \
   product(bool, UnlockDiagnosticVMOptions, trueInDebug, DIAGNOSTIC,         \
           "Enable normal processing of flags relating to field diagnostics")\

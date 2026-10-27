@@ -173,9 +173,18 @@ private:
 
   void update_bot_after_copying(oop obj, size_t word_sz);
 
+  // install_hash: an identity hash to put into the copy before it is published, and won: set if
+  // this thread's copy is the one installed (FastArrayListFolding).
   oop do_copy_to_survivor_space(G1HeapRegionAttr region_attr,
                                 oop obj,
-                                markWord old_mark);
+                                markWord old_mark,
+                                intptr_t install_hash = 0,
+                                bool* won = nullptr);
+
+  // A java.util.FastArrayList that forwards, folded into its storage (FastArrayListFolding): the
+  // location of the storage that obj now forwards to (or the forwardee another thread installed);
+  // or null to copy obj as usual.
+  oop fold_fast_list(oop obj, markWord old_mark);
 
   // This method is applied to the fields of the objects that have just been copied.
   template <class T> void do_oop_evac(T* p);

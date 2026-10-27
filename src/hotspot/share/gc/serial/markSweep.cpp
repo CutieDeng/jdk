@@ -27,6 +27,7 @@
 #include "compiler/compileBroker.hpp"
 #include "gc/serial/markSweep.inline.hpp"
 #include "gc/shared/collectedHeap.inline.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/gcTimer.hpp"
 #include "gc/shared/gcTrace.hpp"
 #include "gc/shared/gc_globals.hpp"
@@ -202,10 +203,20 @@ void MarkSweep::mark_object(oop obj) {
   markWord mark = obj->mark();
   obj->set_mark(markWord::prototype().set_marked());
 
-  ContinuationGCSupport::transform_stack_chunk(obj);
+  // The kind of the klass once, for stack chunks and for java.util.FastArrayList
+  Klass* const k = obj->klass();
+  const int kind = k->kind();
+  if (kind == Klass::InstanceStackChunkKlassKind) {
+    ContinuationGCSupport::transform_stack_chunk(obj);
+  }
 
   if (obj->mark_must_be_preserved(mark)) {
     preserve_mark(obj, mark);
+  }
+
+  // A java.util.FastArrayList that forwards: decide whether this collection folds it
+  if (FastArrayListFolding::is_candidate_of_kind(k, kind)) {
+    FastArrayListFolding::serial_full_mark(obj, mark);
   }
 }
 

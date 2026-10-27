@@ -159,24 +159,40 @@ inline oop PSPromotionManager::copy_to_survivor_space(oop o) {
 
 // Every thread that copies o comes to the same decision: the state of o and of its storage does
 // not change during the collection. The thread whose forwarding of o succeeds counts the fold.
-// The identity hash of o goes to the storage only where no other thread writes the mark of the
-// storage: when it is old. A young storage may be copied by another thread, which increments the
-// age in the mark of its copy after it forwarded the storage (without a CAS), so that a hashed o with
-// a young storage is copied as usual (it folds when its storage is old, or in no young collection).
+// The identity hash of o goes into the storage only where no other thread writes the mark of the
+// storage. A young storage may be copied by another thread, which increments the age in the mark of
+// its copy after it forwarded the storage (without a CAS): so the thread that folds a hashed o copies
+// the storage itself, with the hash in the copy before it is published; if another thread copied it
+// first, o folds into that copy if it has the hash (that thread folds o as well), and is copied as
+// usual this time if not (the storage was reached otherwise, as by an iterator).
 template<bool promote_immediately>
 inline oop PSPromotionManager::fold_fast_list(oop o, markWord test_mark, oop storage) {
+  const bool hashed = !test_mark.has_no_hash();
   oop target = storage;
   if (PSScavenge::is_obj_in_young(storage)) {
-    if (!test_mark.has_no_hash()) {
-      return nullptr;
+    markWord storage_mark = storage->mark();
+    bool won = false;
+    if (storage_mark.is_marked()) {
+      OrderAccess::acquire();
+      target = cast_to_oop(storage_mark.decode_pointer());
+    } else {
+      if (hashed && !FastArrayListFolding::can_take_identity(test_mark, storage_mark)) {
+        return nullptr;
+      }
+      target = copy_unmarked_to_survivor_space<promote_immediately>(storage, storage_mark,
+                                                                    hashed ? test_mark.hash() : 0, &won);
     }
-    target = copy_to_survivor_space<promote_immediately>(storage);
     if (target == storage) {
       return nullptr;                   // the promotion of the storage failed: it stays in place
     }
+    if (hashed && !won && !FastArrayListFolding::carries_hash(test_mark, target)) {
+      return nullptr;                   // another thread's copy, acquired, without the hash
+    }
   }
-  if (!FastArrayListFolding::can_take_identity(test_mark, target)) {
-    return nullptr;
+  if (!hashed || target == storage) {
+    if (!FastArrayListFolding::can_take_identity(test_mark, target)) {
+      return nullptr;
+    }
   }
   // Release: the copy of the storage, which this thread acquired or made, before the forwardee.
   oop forwardee = o->forward_to_atomic(target, test_mark, memory_order_release);
@@ -184,7 +200,9 @@ inline oop PSPromotionManager::fold_fast_list(oop o, markWord test_mark, oop sto
     OrderAccess::acquire();
     return forwardee;                   // another thread forwarded o (folded it as well)
   }
-  FastArrayListFolding::transfer_hash(test_mark, target);   // target is old here if o has a hash
+  if (target == storage) {
+    FastArrayListFolding::transfer_hash(test_mark, target);    // an old storage, which stays
+  }
   FastArrayListFolding::count_fold();
   return target;
 }
@@ -196,7 +214,9 @@ inline oop PSPromotionManager::fold_fast_list(oop o, markWord test_mark, oop sto
 //
 template<bool promote_immediately>
 inline oop PSPromotionManager::copy_unmarked_to_survivor_space(oop o,
-                                                               markWord test_mark) {
+                                                               markWord test_mark,
+                                                               intptr_t install_hash,
+                                                               bool* won) {
   assert(should_scavenge(&o), "Sanity");
 
   Klass* const k = o->klass();
@@ -300,12 +320,21 @@ inline oop PSPromotionManager::copy_unmarked_to_survivor_space(oop o,
   // after claiming and they should see the "completed" object.
   ContinuationGCSupport::transform_stack_chunk(new_obj);
 
+  if (install_hash != 0) {
+    // A FastArrayList storage that takes the identity of the list that forwards to it: the hash
+    // goes into the copy while only this thread sees it (fold_fast_list)
+    new_obj->set_mark(new_obj->mark().copy_set_hash(install_hash));
+  }
+
   // Now we have to CAS in the header.
   // Make copy visible to threads reading the forwardee.
   oop forwardee = o->forward_to_atomic(new_obj, test_mark, memory_order_release);
   if (forwardee == nullptr) {  // forwardee is null when forwarding is successful
     // We won any races, we "own" this object.
     assert(new_obj == o->forwardee(), "Sanity");
+    if (won != nullptr) {
+      *won = true;
+    }
 
     // Increment age if obj still in new generation. Now that
     // we're dealing with a markWord that cannot change, it is

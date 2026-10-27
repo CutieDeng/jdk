@@ -31,6 +31,7 @@
 #include "gc/g1/g1FullGCOopClosures.inline.hpp"
 #include "gc/g1/g1FullGCPrepareTask.inline.hpp"
 #include "gc/g1/heapRegion.inline.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/gcTraceTime.inline.hpp"
 #include "gc/shared/referenceProcessor.hpp"
 #include "logging/log.hpp"
@@ -104,18 +105,26 @@ G1FullGCPrepareTask::G1CalculatePointersClosure::G1CalculatePointersClosure(G1Fu
   _cp(cp) { }
 
 
-G1FullGCPrepareTask::G1PrepareCompactLiveClosure::G1PrepareCompactLiveClosure(G1FullGCCompactionPoint* cp) :
-    _cp(cp) { }
+G1FullGCPrepareTask::G1PrepareCompactLiveClosure::G1PrepareCompactLiveClosure(G1FullGCCompactionPoint* cp,
+                                                                              G1CMBitMap* bitmap) :
+    _cp(cp), _bitmap(bitmap) { }
 
 size_t G1FullGCPrepareTask::G1PrepareCompactLiveClosure::apply(oop object) {
-  size_t size = object->size();
+  Klass* const k = object->klass();
+  size_t size = object->size_given_klass(k);
+  if (FastArrayListFolding::full_is_folded(object, k)) {
+    // A java.util.FastArrayList folded into its storage (FastArrayListFolding): no space, and not
+    // live for the later passes over marked objects (serial and humongous preparation, compaction)
+    _bitmap->clear(object);
+    return size;
+  }
   _cp->forward(object, size);
   return size;
 }
 
 void G1FullGCPrepareTask::G1CalculatePointersClosure::prepare_for_compaction(HeapRegion* hr) {
   if (!_collector->is_free(hr->hrm_index())) {
-    G1PrepareCompactLiveClosure prepare_compact(_cp);
+    G1PrepareCompactLiveClosure prepare_compact(_cp, _bitmap);
     hr->apply_to_marked_objects(_bitmap, &prepare_compact);
   }
 }

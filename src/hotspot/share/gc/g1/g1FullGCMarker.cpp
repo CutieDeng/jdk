@@ -26,6 +26,8 @@
 #include "classfile/classLoaderData.hpp"
 #include "classfile/classLoaderDataGraph.hpp"
 #include "gc/g1/g1FullGCMarker.inline.hpp"
+#include "gc/g1/heapRegion.inline.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/referenceProcessor.hpp"
 #include "gc/shared/taskTerminator.hpp"
 #include "gc/shared/verifyOption.hpp"
@@ -50,6 +52,21 @@ G1FullGCMarker::G1FullGCMarker(G1FullCollector* collector,
 
 G1FullGCMarker::~G1FullGCMarker() {
   assert(is_empty(), "Must be empty at this point");
+}
+
+// Phase 1 marking does not change marks (the bitmap holds the marks), so that the marks of the list
+// and of its storage are their own here. A humongous list is not folded: phase 2 may move it.
+void G1FullGCMarker::decide_fast_list_fold(oop obj) {
+  const markWord mark = obj->mark();
+  oop storage = FastArrayListFolding::storage_to_fold(obj, mark);
+  if (storage == nullptr ||
+      G1CollectedHeap::heap()->heap_region_containing(obj)->is_humongous() ||
+      !FastArrayListFolding::can_take_identity(mark, storage)) {
+    return;
+  }
+  FastArrayListFolding::set_size(obj, InstanceSwissTableBufferKlass::fast_list_folding);
+  FastListFold f = { obj, nullptr, mark, _collector->is_compacting(obj) };
+  _fast_list_folds.append(f);
 }
 
 void G1FullGCMarker::complete_marking(OopQueueSet* oop_stacks,

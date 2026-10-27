@@ -77,6 +77,9 @@ class G1FullCollector : StackObj {
   uint                      _num_workers;
   bool                      _has_compaction_targets;
   bool                      _has_humongous;
+  // Whether a java.util.FastArrayList folded in a region that is not compacted (FastArrayListFolding):
+  // then phase 3 adjusts references to forwarded objects there too.
+  bool                      _has_fast_list_folds_in_place;
   G1FullGCMarker**          _markers;
   G1FullGCCompactionPoint** _compaction_points;
   OopQueueSet               _oop_queue_set;
@@ -109,6 +112,8 @@ public:
   void collect();
   void complete_collection();
 
+  bool has_fast_list_folds_in_place() const { return _has_fast_list_folds_in_place; }
+
   G1FullGCScope*           scope() { return &_scope; }
   uint                     workers() { return _num_workers; }
   G1FullGCMarker*          marker(uint id) { return _markers[id]; }
@@ -129,6 +134,15 @@ public:
 
   inline bool is_compacting(oop obj) const;
   inline bool is_skip_compacting(uint region_index) const;
+
+  // java.util.FastArrayList folding in a full collection (FastArrayListFolding): after phase 2,
+  // forward the folded lists to the new addresses of their storage; after phase 3, give them their
+  // marks again; after the preserved marks are restored, give the hash of a list that was not
+  // compacted (it had no preserved mark) to its storage. Without phases 3 and 4, undo.
+  void fast_list_forward();
+  void fast_list_restore_marks();
+  void fast_list_transfer_hashes();
+  void fast_list_undo();
 
   // Are we (potentially) going to compact into this region?
   inline bool is_compaction_target(uint region_index) const;

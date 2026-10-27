@@ -25,6 +25,7 @@
 #include "precompiled.hpp"
 #include "classfile/vmClasses.hpp"
 #include "classfile/vmSymbols.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/collectedHeap.inline.hpp"
 #include "gc/shared/genCollectedHeap.hpp"
 #include "gc/shared/space.hpp"
@@ -321,8 +322,20 @@ void ContiguousSpace::prepare_for_compaction(CompactPoint* cp) {
     if (cast_to_oop(cur_obj)->is_gc_marked()) {
       // prefetch beyond cur_obj
       Prefetch::write(cur_obj, interval);
-      size_t size = cast_to_oop(cur_obj)->size();
-      compact_top = cp->space->forward(cast_to_oop(cur_obj), size, cp, compact_top);
+      oop obj = cast_to_oop(cur_obj);
+      Klass* const k = obj->klass();
+      size_t size = obj->size_given_klass(k);
+      if (FastArrayListFolding::full_is_folded(obj, k)) {
+        // A java.util.FastArrayList folded into its storage (FastArrayListFolding): no space. It
+        // stays a marked object for phase 3 and becomes a dead one for phase 4, so that the
+        // objects after it move: it is a hole like the first dead object.
+        FastArrayListFolding::serial_full_record(obj, size);
+        if (first_dead == nullptr) {
+          first_dead = cur_obj;
+        }
+      } else {
+        compact_top = cp->space->forward(obj, size, cp, compact_top);
+      }
       cur_obj += size;
       end_of_live = cur_obj;
     } else {

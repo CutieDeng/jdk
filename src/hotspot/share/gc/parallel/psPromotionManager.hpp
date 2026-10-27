@@ -111,8 +111,11 @@ class PSPromotionManager {
 
   static PSScannerTasksQueueSet* stack_array_depth() { return _stack_array_depth; }
 
+  // install_hash: an identity hash to put into the copy before it is published, and won: set if
+  // this thread's copy is the one installed (FastArrayListFolding).
   template<bool promote_immediately>
-  oop copy_unmarked_to_survivor_space(oop o, markWord m);
+  oop copy_unmarked_to_survivor_space(oop o, markWord m,
+                                      intptr_t install_hash = 0, bool* won = nullptr);
 
   // A java.util.FastArrayList that forwards, folded into its storage (FastArrayListFolding): the
   // location of the storage that o now forwards to (or the forwardee another thread installed); or

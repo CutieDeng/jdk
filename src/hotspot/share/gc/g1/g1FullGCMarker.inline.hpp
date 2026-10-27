@@ -37,6 +37,7 @@
 #include "gc/g1/g1RegionMarkStatsCache.hpp"
 #include "gc/g1/g1StringDedup.hpp"
 #include "gc/shared/continuationGCSupport.inline.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/preservedMarks.inline.hpp"
 #include "gc/shared/stringdedup/stringDedup.hpp"
 #include "oops/access.inline.hpp"
@@ -59,6 +60,15 @@ inline bool G1FullGCMarker::mark_object(oop obj) {
     preserved_stack()->push_if_necessary(obj, obj->mark());
   }
 
+  // The kind of the klass once, for java.util.FastArrayList and for stack chunks
+  Klass* const k = obj->klass();
+  const int kind = k->kind();
+
+  // A java.util.FastArrayList that forwards: decide whether this collection folds it
+  if (FastArrayListFolding::is_candidate_of_kind(k, kind)) {
+    decide_fast_list_fold(obj);
+  }
+
   // Check if deduplicatable string.
   if (StringDedup::is_enabled() &&
       java_lang_String::is_instance(obj) &&
@@ -66,7 +76,9 @@ inline bool G1FullGCMarker::mark_object(oop obj) {
     _string_dedup_requests.add(obj);
   }
 
-  ContinuationGCSupport::transform_stack_chunk(obj);
+  if (kind == Klass::InstanceStackChunkKlassKind) {
+    ContinuationGCSupport::transform_stack_chunk(obj);
+  }
 
   // Collect live words.
   _mark_stats_cache.add_live_words(obj);

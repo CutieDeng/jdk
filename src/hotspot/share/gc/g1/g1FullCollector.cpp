@@ -28,6 +28,8 @@
 #include "gc/g1/g1FullCollector.inline.hpp"
 #include "gc/g1/g1FullGCAdjustTask.hpp"
 #include "gc/g1/g1FullGCCompactTask.hpp"
+#include "gc/g1/g1FullGCMarker.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/g1/g1FullGCMarker.inline.hpp"
 #include "gc/g1/g1FullGCMarkTask.hpp"
 #include "gc/g1/g1FullGCPrepareTask.inline.hpp"
@@ -117,6 +119,7 @@ G1FullCollector::G1FullCollector(G1CollectedHeap* heap,
     _num_workers(calc_active_workers()),
     _has_compaction_targets(false),
     _has_humongous(false),
+    _has_fast_list_folds_in_place(false),
     _oop_queue_set(_num_workers),
     _array_queue_set(_num_workers),
     _preserved_marks_set(true),
@@ -212,10 +215,15 @@ void G1FullCollector::collect() {
   phase2_prepare_compaction();
 
   if (has_compaction_targets()) {
+    fast_list_forward();
+
     phase3_adjust_pointers();
+
+    fast_list_restore_marks();
 
     phase4_do_compaction();
   } else {
+    fast_list_undo();
     // All regions have a high live ratio thus will not be compacted.
     // The live ratio is only considered if do_maximal_compaction is false.
     log_info(gc, phases) ("No Regions selected for compaction. Skipping Phase 3: Adjust pointers and Phase 4: Compact heap");
@@ -229,6 +237,7 @@ void G1FullCollector::collect() {
 void G1FullCollector::complete_collection() {
   // Restore all marks.
   restore_marks();
+  fast_list_transfer_hashes();
 
   // When the pointers have been adjusted and moved, we can
   // update the derived pointer table.
@@ -453,6 +462,60 @@ void G1FullCollector::phase2d_prepare_humongous_compaction() {
       humongous_cp->add(hr);
     }
     region_index++;
+  }
+}
+
+void G1FullCollector::fast_list_forward() {
+  for (uint i = 0; i < workers(); i++) {
+    GrowableArrayCHeap<G1FullGCMarker::FastListFold, mtGC>* folds = marker(i)->fast_list_folds();
+    for (int j = 0; j < folds->length(); j++) {
+      G1FullGCMarker::FastListFold& f = folds->at(j);
+      oop storage = FastArrayListFolding::storage_of(f.list);
+      f.target = storage->is_forwarded() ? storage->forwardee() : storage;
+      f.compacting = is_compacting(f.list);     // phase 2 may have made its region non-compacting
+      f.list->forward_to(f.target);
+      if (!f.compacting) {
+        // not live for phase 5, which fills the dead objects of non-compacting regions
+        mark_bitmap()->clear(f.list);
+        _has_fast_list_folds_in_place = true;
+      }
+      FastArrayListFolding::count_fold();
+    }
+  }
+}
+
+void G1FullCollector::fast_list_restore_marks() {
+  for (uint i = 0; i < workers(); i++) {
+    GrowableArrayCHeap<G1FullGCMarker::FastListFold, mtGC>* folds = marker(i)->fast_list_folds();
+    for (int j = 0; j < folds->length(); j++) {
+      const G1FullGCMarker::FastListFold& f = folds->at(j);
+      f.list->set_mark(f.mark);
+    }
+  }
+}
+
+void G1FullCollector::fast_list_transfer_hashes() {
+  for (uint i = 0; i < workers(); i++) {
+    GrowableArrayCHeap<G1FullGCMarker::FastListFold, mtGC>* folds = marker(i)->fast_list_folds();
+    for (int j = 0; j < folds->length(); j++) {
+      const G1FullGCMarker::FastListFold& f = folds->at(j);
+      if (f.target != nullptr && !f.compacting && !f.mark.has_no_hash()) {
+        f.target->set_mark(f.target->mark().copy_set_hash(f.mark.hash()));
+      }
+    }
+    folds->clear();
+  }
+  _has_fast_list_folds_in_place = false;
+  FastArrayListFolding::report("G1 Full");
+}
+
+void G1FullCollector::fast_list_undo() {
+  for (uint i = 0; i < workers(); i++) {
+    GrowableArrayCHeap<G1FullGCMarker::FastListFold, mtGC>* folds = marker(i)->fast_list_folds();
+    for (int j = 0; j < folds->length(); j++) {
+      FastArrayListFolding::set_size(folds->at(j).list, InstanceSwissTableBufferKlass::fast_list_forwarded);
+    }
+    folds->clear();
   }
 }
 

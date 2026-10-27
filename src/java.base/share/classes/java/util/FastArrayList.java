@@ -47,10 +47,12 @@ import jdk.internal.vm.annotation.IntrinsicCandidate;
  * is allocated, and is at least 1. When a change needs another capacity (an addition to a full
  * list, {@link #ensureCapacity(int)}, {@link #trimToSize()}), the elements move to a new list object
  * of that capacity, and the list forwards to it: the list keeps its identity, every reference to it
- * stays valid, and it reaches its elements through one more reference. The young collections of
- * the Serial and Parallel collectors fold a young list that forwards into the list object that holds
- * its elements, which then is the list (same identity, identity hash included): its elements are
- * one reference away again.
+ * stays valid, and it reaches its elements through one more reference. Collections fold a list that
+ * forwards into the list object that holds its elements, which then is the list (same identity,
+ * identity hash included), so that its elements are one reference away again: the young
+ * collections of the Serial, Parallel and G1 collectors fold the lists they copy (G1's mixed
+ * collections the old ones in their collection set), the full collections of Serial and G1 all
+ * lists. Parallel's full collection, ZGC and Shenandoah do not fold.
  *
  * <p>There is no modification count. Iterators, list iterators and sublists fail fast: they throw
  * {@link ConcurrentModificationException} when the size changed after they were created, other
@@ -123,9 +125,9 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      *   size   number of elements; or FORWARDED: the elements are in the list object fwd, the
      *          storage of this list, whose size is the number of elements. When the elements move
      *          again, the storage they leave forwards to the new one as well (RETIRED, so that its
-     *          iterators fail), and this list to the new one directly. A young collection of Serial
-     *          or Parallel may fold a list that forwards: every reference to it then refers to (the
-     *          copy of) its storage, which is the list from then on (FastArrayListFolding in the VM).
+     *          iterators fail), and this list to the new one directly. A collection may fold a list
+     *          that forwards: every reference to it then refers to (the copy of) its storage, which
+     *          is the list from then on (FastArrayListFolding in the VM).
      *   cap    the capacity, written by the VM at allocation and never changed. Read with fwd as one
      *          8-byte word where they fill one (capAndForward), so that no two adjacent hot fields
      *          are loaded with the same size (see the VM layout comment); not final, as the word

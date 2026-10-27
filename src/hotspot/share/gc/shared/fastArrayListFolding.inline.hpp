@@ -38,6 +38,11 @@ inline bool FastArrayListFolding::is_candidate(oop obj, const Klass* k) {
          FastListFolding && k == InstanceSwissTableBufferKlass::fast_list_klass();
 }
 
+inline bool FastArrayListFolding::is_candidate_of_kind(const Klass* k, int kind) {
+  return kind == Klass::InstanceSwissTableBufferKlassKind && FastListFolding &&
+         k == InstanceSwissTableBufferKlass::fast_list_klass();
+}
+
 inline oop FastArrayListFolding::storage_to_fold(oop obj, markWord m) {
   const Klass* list_klass = InstanceSwissTableBufferKlass::fast_list_klass();
   if (!FastListFolding || list_klass == nullptr || obj->klass() != list_klass) {
@@ -46,24 +51,50 @@ inline oop FastArrayListFolding::storage_to_fold(oop obj, markWord m) {
   if (!m.is_unlocked()) {
     return nullptr;                     // locked: its mark is elsewhere (stack lock, monitor)
   }
-  const int size_offset = InstanceSwissTableBufferKlass::fast_list_size_offset();
-  if (*obj->field_addr<jint>(size_offset) != InstanceSwissTableBufferKlass::fast_list_forwarded) {
+  if (size_of(obj) != InstanceSwissTableBufferKlass::fast_list_forwarded) {
     return nullptr;
   }
-  oop storage = HeapAccess<AS_NO_KEEPALIVE>::oop_load_at(obj, InstanceSwissTableBufferKlass::fast_list_fwd_offset());
+  oop storage = storage_of(obj);
   if (storage == nullptr || storage == obj || storage->klass() != list_klass) {
     return nullptr;
   }
   // The fields of an object that is copied already are still in place.
-  if (*storage->field_addr<jint>(size_offset) < 0) {
+  if (size_of(storage) < 0) {
     return nullptr;                     // a racing change left another state
   }
   return storage;
 }
 
+inline bool FastArrayListFolding::can_take_identity(markWord m, markWord t) {
+  return t.is_unlocked() && (m.has_no_hash() || t.has_no_hash() || t.hash() == m.hash());
+}
+
+inline bool FastArrayListFolding::carries_hash(markWord m, oop copy) {
+  const markWord c = copy->mark();
+  return c.is_unlocked() && !c.has_no_hash() && c.hash() == m.hash();
+}
+
 inline bool FastArrayListFolding::can_take_identity(markWord m, oop target) {
-  const markWord t = target->mark();
-  return t.is_unlocked() && (m.has_no_hash() || t.has_no_hash());
+  return can_take_identity(m, target->mark());
+}
+
+inline jint FastArrayListFolding::size_of(oop list) {
+  return *list->field_addr<jint>(InstanceSwissTableBufferKlass::fast_list_size_offset());
+}
+
+inline void FastArrayListFolding::set_size(oop list, jint size) {
+  *list->field_addr<jint>(InstanceSwissTableBufferKlass::fast_list_size_offset()) = size;
+}
+
+// A raw load: only stop-the-world collections fold. (A HeapAccess would instantiate the barrier
+// dispatch of every barrier set where this is inlined, Shenandoah's evacuating load barrier
+// included, whose object copy then keeps the copy of the young collection out of line.)
+inline oop FastArrayListFolding::storage_of(oop list) {
+  return RawAccess<>::oop_load_at(list, InstanceSwissTableBufferKlass::fast_list_fwd_offset());
+}
+
+inline bool FastArrayListFolding::full_is_folded(oop obj, const Klass* k) {
+  return is_candidate(obj, k) && size_of(obj) == InstanceSwissTableBufferKlass::fast_list_folding;
 }
 
 inline void FastArrayListFolding::transfer_hash(markWord m, oop target) {

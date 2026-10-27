@@ -50,6 +50,17 @@ class G1FullCollector;
 class TaskTerminator;
 
 class G1FullGCMarker : public CHeapObj<mtGC> {
+public:
+  // A java.util.FastArrayList that forwards, which this full collection folds into its storage
+  // (FastArrayListFolding): decided in phase 1 by the worker that marked it.
+  struct FastListFold {
+    oop      list;
+    oop      target;        // the new address of the storage, after phase 2
+    markWord mark;          // the mark of the list before the collection
+    bool     compacting;    // whether the list is in a region that is compacted
+  };
+
+private:
   G1FullCollector*   _collector;
 
   uint               _worker_id;
@@ -69,6 +80,9 @@ class G1FullGCMarker : public CHeapObj<mtGC> {
 
 
   G1RegionMarkStatsCache _mark_stats_cache;
+
+  GrowableArrayCHeap<FastListFold, mtGC> _fast_list_folds;
+  void decide_fast_list_fold(oop obj);
 
   inline bool is_empty();
   inline void push_objarray(oop obj, size_t index);
@@ -96,6 +110,8 @@ public:
                  PreservedMarks* preserved_stack,
                  G1RegionMarkStats* mark_stats);
   ~G1FullGCMarker();
+
+  GrowableArrayCHeap<FastListFold, mtGC>* fast_list_folds() { return &_fast_list_folds; }
 
   // Stack getters
   OopQueue*          oop_stack()       { return &_oop_stack; }

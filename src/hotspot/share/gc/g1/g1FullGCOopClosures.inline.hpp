@@ -61,7 +61,12 @@ template <class T> inline void G1AdjustClosure::adjust_pointer(T* p) {
   assert(Universe::heap()->is_in(obj), "should be in heap");
   if (!_collector->is_compacting(obj)) {
     // We never forward objects in non-compacting regions so there is no need to
-    // process them further.
+    // process them further; but for a java.util.FastArrayList folded there
+    // (FastArrayListFolding), forwarded to its storage. Other objects there have
+    // their own marks, which are not forwarding pointers.
+    if (_collector->has_fast_list_folds_in_place() && obj->is_forwarded()) {
+      RawAccess<IS_NOT_NULL>::oop_store(p, obj->forwardee());
+    }
     return;
   }
 

@@ -34,6 +34,7 @@
 #include "gc/g1/g1Trace.hpp"
 #include "gc/g1/g1YoungGCEvacFailureInjector.inline.hpp"
 #include "gc/shared/continuationGCSupport.inline.hpp"
+#include "gc/shared/fastArrayListFolding.inline.hpp"
 #include "gc/shared/partialArrayTaskStepper.inline.hpp"
 #include "gc/shared/preservedMarks.inline.hpp"
 #include "gc/shared/stringdedup/stringDedup.hpp"
@@ -442,18 +443,92 @@ void G1ParScanThreadState::update_bot_after_copying(oop obj, size_t word_sz) {
   region->update_bot_for_obj(obj_start, word_sz);
 }
 
+// Every thread that copies old comes to the same decision: the state of old and of its storage does
+// not change during the collection. The forwarding is relaxed (see do_copy_to_survivor_space): a
+// thread must not read the contents of a copy another thread made without other synchronization.
+// A hashed list folds into a copy of its storage that has its hash: the one this thread makes, with
+// the hash in it before it is published (with release), or the one that another thread folding
+// old made (this thread acquires before it reads the mark of the copy); or into an old storage
+// outside the collection set, which stays where it is and whose mark only the thread that forwards
+// old writes (not in a concurrent start pause, see below). A storage that is humongous or in an
+// optional region is left alone. Out of line: only lists that forward come here.
+NOINLINE oop G1ParScanThreadState::fold_fast_list(oop const old, markWord const old_mark) {
+  oop storage = FastArrayListFolding::storage_to_fold(old, old_mark);
+  if (storage == nullptr) {
+    return nullptr;
+  }
+  const bool hashed = !old_mark.has_no_hash();
+  const G1HeapRegionAttr storage_attr = _g1h->region_attr(storage);
+  oop target;
+  if (storage_attr.is_in_cset()) {
+    markWord storage_mark = storage->mark();
+    bool won = false;
+    if (storage_mark.is_marked()) {
+      target = cast_to_oop(storage_mark.decode_pointer());
+    } else {
+      if (!FastArrayListFolding::can_take_identity(old_mark, storage_mark)) {
+        return nullptr;
+      }
+      target = do_copy_to_survivor_space(storage_attr, storage, storage_mark,
+                                         hashed ? old_mark.hash() : 0, &won);
+    }
+    if (target == storage) {
+      return nullptr;                   // the evacuation of the storage failed
+    }
+    if (hashed && !won) {
+      OrderAccess::acquire();           // another thread's copy
+      if (!FastArrayListFolding::carries_hash(old_mark, target)) {
+        return nullptr;
+      }
+    }
+  } else {
+    if (storage_attr.is_optional() || storage_attr.is_humongous_candidate() || storage_attr.is_new_survivor() ||
+        _g1h->heap_region_containing(storage)->is_humongous()) {
+      return nullptr;
+    }
+    // In a concurrent start pause the roots that refer to objects outside the collection set mark
+    // them (G1ParCopyClosure); a root that refers to old gets the forwardee instead, unmarked. The
+    // storage was reached through old (a survivor, which root region scanning visits) and would
+    // not be marked: so no folding into an old storage then.
+    if (_g1h->collector_state()->in_concurrent_start_gc()) {
+      return nullptr;
+    }
+    if (!FastArrayListFolding::can_take_identity(old_mark, storage)) {
+      return nullptr;
+    }
+    target = storage;                   // old, outside the collection set: stays where it is
+  }
+  const oop forwardee = old->forward_to_atomic(target, old_mark, memory_order_relaxed);
+  if (forwardee != nullptr) {
+    return forwardee;                   // another thread forwarded old (folded it as well)
+  }
+  if (target == storage) {
+    FastArrayListFolding::transfer_hash(old_mark, target);
+  }
+  FastArrayListFolding::count_fold();
+  return target;
+}
+
 // Private inline function, for direct internal use and providing the
 // implementation of the public not-inline function.
 MAYBE_INLINE_EVACUATION
 oop G1ParScanThreadState::do_copy_to_survivor_space(G1HeapRegionAttr const region_attr,
                                                     oop const old,
-                                                    markWord const old_mark) {
+                                                    markWord const old_mark,
+                                                    intptr_t install_hash,
+                                                    bool* won) {
   assert(region_attr.is_in_cset(),
          "Unexpected region attr type: %s", region_attr.get_type_str());
 
   // Get the klass once.  We'll need it again later, and this avoids
   // re-decoding when it's compressed.
   Klass* klass = old->klass();
+  if (FastArrayListFolding::is_candidate(old, klass)) {
+    const oop folded = fold_fast_list(old, old_mark);
+    if (folded != nullptr) {
+      return folded;
+    }
+  }
   const size_t word_sz = old->size_given_klass(klass);
 
   uint age = 0;
@@ -490,12 +565,22 @@ oop G1ParScanThreadState::do_copy_to_survivor_space(G1HeapRegionAttr const regio
   Copy::aligned_disjoint_words(cast_from_oop<HeapWord*>(old), obj_ptr, word_sz);
 
   const oop obj = cast_to_oop(obj_ptr);
+  if (install_hash != 0) {
+    // A FastArrayList storage that takes the identity of the list that forwards to it: the hash
+    // goes into the copy while only this thread sees it, and the copy is published with release,
+    // so that another thread that folds the list finds the hash in it (fold_fast_list)
+    obj->set_mark(obj->mark().copy_set_hash(install_hash));
+    OrderAccess::release();
+  }
   // Because the forwarding is done with memory_order_relaxed there is no
   // ordering with the above copy.  Clients that get the forwardee must not
   // examine its contents without other synchronization, since the contents
   // may not be up to date for them.
   const oop forward_ptr = old->forward_to_atomic(obj, old_mark, memory_order_relaxed);
   if (forward_ptr == nullptr) {
+    if (won != nullptr) {
+      *won = true;
+    }
 
     {
       const uint young_index = from_region->young_index_in_cset();
