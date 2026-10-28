@@ -108,6 +108,16 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * a list that forwards, so that it is not loaded next to element 0 of a list that has elements.
      */
     private static final boolean FWD_IN_WORD;
+    /**
+     * Whether slot 0 holds the storage of a list object that forwards, and fwd is slot 0 (with
+     * generational ZGC, which has no compressed oops: 8 bytes less per list object). The storage is
+     * tagged there: a reserved bit of the raw reference (FWD_TAG), which no element store sets and the
+     * collector keeps. Slot 0 is written only with a CAS from the element read (putSlot0), so that a
+     * racing write never replaces the storage, and by storeForward0.
+     */
+    private static final boolean SLOT0;
+    /** With SLOT0, the tag bit of slot 0's raw word; else 0. */
+    private static final long FWD_TAG;
     private static final boolean BIG_ENDIAN = U.isBigEndian();
 
     static {
@@ -118,6 +128,11 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         CAP = U.objectFieldOffset(FastArrayList.class, "cap");
         CAP_WORD = (CAP & 7) == 0;
         FWD_IN_WORD = CAP_WORD && FWD == CAP + 4;
+        FWD_TAG = forwardTag();
+        SLOT0 = FWD_TAG != 0;
+        if (SLOT0 != (DATA_BASE == FWD)) {
+            throw new InternalError("FastArrayList layout");
+        }
     }
 
     /*
@@ -125,7 +140,8 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      *   size   number of elements; or FORWARDED: the elements are in the list object fwd, the
      *          storage of this list, whose size is the number of elements. When the elements move
      *          again, the storage they leave forwards to the new one as well (RETIRED, so that its
-     *          iterators fail), and this list to the new one directly. A collection may fold a list
+     *          iterators fail; with SLOT0 it is only RETIRED), and this list to the new one
+     *          directly. A collection may fold a list
      *          that forwards: every reference to it then refers to (the copy of) its storage, which
      *          is the list from then on (FastArrayListFolding in the VM).
      *   cap    the capacity, written by the VM at allocation and never changed. Read with fwd as one
@@ -145,9 +161,12 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      *          scan objects of this kind only within dirty cards (oopDesc::is_marked_precisely), and a
      *          putfield from compiled code marks the card of the object start, which need not hold
      *          fwd (P0: lists lost their storage in collections after a putfield of fwd).
+     *          With SLOT0, fwd is slot 0: it holds element 0 of a list with elements, and is read as
+     *          fwd only when its tag says it holds the storage.
      * The elements 0..size-1 are at DATA_BASE + (i << REF_SHIFT); the slots from size to cap are null.
      * A list that forwards has no elements in its own slots. Only this list refers to its storage, and
-     * the storage is never handed out: the list keeps its identity.
+     * the storage is never handed out: the list keeps its identity. (With SLOT0, a read of element 0
+     * that races with a move may return the storage, which slot 0 holds from then on.)
      * Memory safety does not depend on the size being right: every element access checks its index
      * against a size that is at least 0 and at most the cap of the list object accessed, which never
      * changes. Each method reads the size of the list object it accesses once and bounds all its slot
@@ -169,6 +188,15 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     private static native int dataBase();
 
     private static native int maxCapacity();
+
+    /** The tag of the storage in slot 0 (SLOT0), else 0. */
+    private static native long forwardTag();
+
+    /**
+     * SLOT0: stores n, tagged, into slot 0 of l, with the collector's barrier, in one store (the
+     * element there, if any, was copied).
+     */
+    private static native void storeForward0(FastArrayList<?> l, FastArrayList<?> n);
 
     private static native void registerNatives();
 
@@ -205,7 +233,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         Object[] a = c.toArray();
         FastArrayList<E> l = withCapacity(a.length);
         for (int i = 0; i < a.length; i++) {
-            l.put(i, a[i]);
+            l.init(i, a[i]);
         }
         l.size = a.length;
         return l;
@@ -222,8 +250,30 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         return (E) U.getReference(this, offset(index));
     }
 
+    /** A store into a slot of a list that other threads may see (see putSlot0). */
     private void put(int index, Object e) {
+        if (SLOT0 && index == 0) {
+            putSlot0(e);
+            return;
+        }
         U.putReference(this, offset(index), e);
+    }
+
+    /** A store into a slot of a list that no other thread sees yet (a new list, a new storage). */
+    private void init(int index, Object e) {
+        U.putReference(this, offset(index), e);
+    }
+
+    /**
+     * SLOT0: the store of e into slot 0, as a CAS from the value read, which fails if a racing move
+     * has put the storage there since (the tag makes the raw words differ): then the list has moved,
+     * and the change throws rather than replace the storage, which would lose every element.
+     */
+    private void putSlot0(Object e) {
+        Object old = U.getReference(this, DATA_BASE);
+        if (!U.compareAndSetReference(this, DATA_BASE, old, e)) {
+            throw new ConcurrentModificationException();
+        }
     }
 
     /**
@@ -234,6 +284,14 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     private static void copySlots(FastArrayList<?> src, int srcPos, FastArrayList<?> dst, int dstPos, int n) {
         Preconditions.checkFromIndexSize(srcPos, n, capOf(src), Preconditions.AIOOBE_FORMATTER);
         Preconditions.checkFromIndexSize(dstPos, n, capOf(dst), Preconditions.AIOOBE_FORMATTER);
+        if (SLOT0 && dstPos == 0 && n > 0) {
+            // slot 0 of a list that other threads may see first (srcPos >= 0 = dstPos: the order of a
+            // copy downwards), with its CAS
+            dst.putSlot0(src.at(srcPos));
+            srcPos++;
+            dstPos++;
+            n--;
+        }
         copySlots0(src, srcPos, dst, dstPos, n);
     }
 
@@ -317,7 +375,13 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         }
         long c = !CAP_WORD ? l.cap & 0xFFFFFFFFL
                            : BIG_ENDIAN ? capWord0(l) >>> 32 : capWord0(l) & 0xFFFFFFFFL;
-        return l.fwd != null ? c | (1L << 32) : c;
+        return (SLOT0 ? slot0Tagged(l) : l.fwd != null) ? c | (1L << 32) : c;
+    }
+
+    /** SLOT0: whether slot 0 of l holds the storage (its raw word has the tag). */
+    @ForceInline
+    private static boolean slot0Tagged(FastArrayList<?> l) {
+        return (U.getLong(l, DATA_BASE) & FWD_TAG) != 0;
     }
 
     /** Of a value of capAndForward: whether the list forwards. */
@@ -341,7 +405,9 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      */
     @ForceInline
     private FastArrayList<E> forwardee() {
-        FastArrayList<E> t = fwd;
+        // with SLOT0, fwd is slot 0: read only when tagged (it holds the storage then, for good: a CAS
+        // from an element fails on the tag, and the collector keeps the tag)
+        FastArrayList<E> t = !SLOT0 || slot0Tagged(this) ? fwd : null;
         if (t == null) {
             // This list does not forward (any more): a young collection folded the list object that
             // forwarded into its storage, which this object is, after the caller had tested the
@@ -392,6 +458,24 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     @ForceInline
     private void forwardTo(FastArrayList<E> t, int s, FastArrayList<E> n) {
         forwardFence0();
+        if (SLOT0) {
+            // n, tagged, into slot 0 (in place of element 0, copied to n); the slots above cleared.
+            // The storage t that the elements leave keeps its element 0: a thread that still reads
+            // t (a stale reader, an iterator) would read n there as an element, and no reader of t
+            // follows it to n (its size, RETIRED, makes them throw).
+            if (t == this) {
+                storeForward0(this, n);
+                size = FORWARDED;
+                for (int i = 1; i < s; i++) {
+                    put(i, null);
+                }
+            } else {
+                storeForward0(this, n);
+                t.size = RETIRED;
+            }
+            forwardFence0();
+            return;
+        }
         if (t == this) {
             U.putReference(this, FWD, n);
             size = FORWARDED;
@@ -609,7 +693,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
             return;
         }
         FastArrayList<E> n = copyOfSlots(t, s, grownCapacity(c, s + 1));
-        n.put(s, e);
+        n.init(s, e);
         n.size = s + 1;
         forwardTo(t, s, n);
     }
@@ -635,7 +719,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         } else {
             FastArrayList<E> n = copyOfSlots(t, index, grownCapacity(c, s + 1));
             copySlots(t, index, n, index + 1, s - index);
-            n.put(index, element);
+            n.init(index, element);
             n.size = s + 1;
             forwardTo(t, s, n);
         }
@@ -669,7 +753,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
             }
             FastArrayList<E> n = copyOfSlots(t, s, grownCapacity(capT, s + a.length));
             for (int i = 0; i < a.length; i++) {
-                n.put(s + i, a[i]);
+                n.init(s + i, a[i]);
             }
             n.size = s + a.length;
             forwardTo(t, s, n);
@@ -712,7 +796,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
             FastArrayList<E> m = copyOfSlots(t, index, grownCapacity(capT, s + n));
             copySlots(t, index, m, index + n, s - index);
             for (int i = 0; i < n; i++) {
-                m.put(index + i, a[i]);
+                m.init(index + i, a[i]);
             }
             m.size = s + n;
             forwardTo(t, s, m);

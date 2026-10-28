@@ -186,6 +186,11 @@ const int ObjectAlignmentInBytes = 8;
           "the young collections of Serial, Parallel and G1 (young lists) "\
           "and the full collections of Serial and G1 (all lists)")         \
                                                                             \
+  product(bool, FastListSlot0Forwarding, true, DIAGNOSTIC,                  \
+          "With generational ZGC, a java.util.FastArrayList that forwards " \
+          "keeps its storage in slot 0, tagged, instead of a field of its " \
+          "own (8 bytes less per list object)")                             \
+                                                                            \
   product(bool, UnlockDiagnosticVMOptions, trueInDebug, DIAGNOSTIC,         \
           "Enable normal processing of flags relating to field diagnostics")\
                                                                             \

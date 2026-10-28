@@ -39,6 +39,7 @@
 #include "jvm_io.h"
 #include "memory/allocation.hpp"
 #include "memory/resourceArea.hpp"
+#include "oops/instanceSwissTableBufferKlass.hpp"
 #include "opto/addnode.hpp"
 #include "opto/block.hpp"
 #include "opto/c2compiler.hpp"
@@ -1309,7 +1310,18 @@ bool Compile::is_swiss_table_buffer_data(const TypePtr* adr_type) const {
     return false;
   }
   const int offset = tinst->offset();
-  return offset == Type::OffsetBot || offset >= ik->layout_helper_size_in_bytes();
+  return offset == Type::OffsetBot || offset >= swiss_table_buffer_data_base(ik);
+}
+
+// The offset where the trailing data starts: the instance size of the class; for a FastArrayList
+// with slot 0 forwarding, the offset of its last field, fwd, which slot 0 overlays
+// (InstanceSwissTableBufferKlass::fast_list_forward_tag), so that slot 0 is not a field for C2 (its
+// alias class, and the type of a load from it) but one of the elements.
+int Compile::swiss_table_buffer_data_base(ciInstanceKlass* ik) const {
+  if (ik == env()->FastArrayList_klass() && InstanceSwissTableBufferKlass::fast_list_slot0_forwarding()) {
+    return InstanceSwissTableBufferKlass::fast_list_layout().data_base;
+  }
+  return ik->layout_helper_size_in_bytes();
 }
 
 const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
@@ -1453,7 +1465,8 @@ const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
       if (!is_known_inst) { // Do it only for non-instance types
         tj = to = TypeInstPtr::make(TypePtr::BotPTR, env()->Object_klass(), false, nullptr, offset);
       }
-    } else if (offset < 0 || offset >= ik->layout_helper_size_in_bytes()) {
+    } else if (offset < 0 || offset >= ik->layout_helper_size_in_bytes() ||
+               (is_swiss_table_buffer_klass(ik) && offset >= swiss_table_buffer_data_base(ik))) {
       // Static fields are in the space above the normal instance
       // fields in the java.lang.Class instance.
       if (is_swiss_table_buffer_klass(ik)) {

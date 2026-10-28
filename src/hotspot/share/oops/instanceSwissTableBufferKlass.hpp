@@ -113,6 +113,7 @@ private:
   static int _aux_offset;                   // SwissTableBuffer.aux
   static int _fast_list_size_offset;        // FastArrayList.size
   static int _fast_list_fwd_offset;         // FastArrayList.fwd
+  static jlong _fast_list_forward_tag;      // with slot 0 forwarding: the tag bit, else 0
 
   InstanceSwissTableBufferKlass(const ClassFileParser& parser);
 
@@ -138,6 +139,16 @@ public:
   static int aux_offset() { return _aux_offset; }
   static int fast_list_size_offset() { return _fast_list_size_offset; }
   static int fast_list_fwd_offset() { return _fast_list_fwd_offset; }
+  // Slot 0 forwarding (generational ZGC, which has no compressed oops): a FastArrayList has no fwd
+  // field of its own. Its elements start at the offset of the declared field fwd, and a list object
+  // that forwards keeps its storage in slot 0, with a reserved bit of the colored pointer set (this
+  // tag), which no element store sets and which ZGC keeps when it heals or remaps the field. Without
+  // it (other collectors, non-generational ZGC), 0: fwd is a field of its own, before slot 0.
+  static jlong fast_list_forward_tag() { return _fast_list_forward_tag; }
+  static bool fast_list_slot0_forwarding() { return _fast_list_forward_tag != 0; }
+  // Slot 0 forwarding: stores storage, tagged, into slot 0 of list, with the collector's barrier, in
+  // one store (FastArrayList.storeForward0).
+  static void store_fast_list_forward(oop list, oop storage);
   static const Klass* fast_list_klass() { return _fast_list_klass; }
   // Sizes of a FastArrayList that does not hold its elements (FastArrayList.FORWARDED, RETIRED): the
   // list object that forwards to its storage (fwd), which a young collection may fold into the

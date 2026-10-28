@@ -36,6 +36,9 @@
 #include "runtime/jniHandles.inline.hpp"
 #include "utilities/ostream.hpp"
 #include "utilities/powerOfTwo.hpp"
+#if INCLUDE_ZGC
+#include "gc/z/zBarrierSet.hpp"
+#endif
 
 InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_swiss     = { -1, false, -1, 1, 2 };
 InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_fast_list = { -1, false, -1, 0, 1 };
@@ -43,6 +46,7 @@ const Klass* InstanceSwissTableBufferKlass::_fast_list_klass = nullptr;
 int InstanceSwissTableBufferKlass::_aux_offset = -1;
 int InstanceSwissTableBufferKlass::_fast_list_size_offset = -1;
 int InstanceSwissTableBufferKlass::_fast_list_fwd_offset = -1;
+jlong InstanceSwissTableBufferKlass::_fast_list_forward_tag = 0;
 
 InstanceSwissTableBufferKlass::InstanceSwissTableBufferKlass(const ClassFileParser& parser)
   : InstanceKlass(parser, Kind) {
@@ -91,9 +95,29 @@ void InstanceSwissTableBufferKlass::init_offsets() {
       !is_aligned(_fast_list.capacity_offset, BytesPerLong)) {
     base += heapOopSize;
   }
+#if INCLUDE_ZGC
+  if (UseZGC && ZGenerational && FastListSlot0Forwarding) {
+    // Slot 0 forwarding (see fast_list_forward_tag): the elements start at fwd, the last field, so
+    // that a list object has no word of its own for the storage (8 bytes less without compressed oops).
+    guarantee(_fast_list_fwd_offset + heapOopSize == base, "FastArrayList.fwd must be the last field");
+    base = _fast_list_fwd_offset;
+    _fast_list_forward_tag = ZBarrierSet::fast_list_forward_tag();
+  }
+#endif
   guarantee(is_aligned(base, heapOopSize), "FastArrayList elements must be aligned");
   _fast_list.data_base = base;
   _fast_list_klass = f;
+}
+
+void InstanceSwissTableBufferKlass::store_fast_list_forward(oop list, oop storage) {
+  assert(list->klass() == _fast_list_klass && storage->klass() == _fast_list_klass, "FastArrayList");
+#if INCLUDE_ZGC
+  if (fast_list_slot0_forwarding()) {
+    ZBarrierSet::store_tagged_oop_field(list, _fast_list.data_base, storage, _fast_list_forward_tag);
+    return;
+  }
+#endif
+  ShouldNotReachHere();
 }
 
 jint InstanceSwissTableBufferKlass::max_capacity() const {
@@ -219,6 +243,15 @@ JVM_ENTRY(jint, FastArrayList_maxCapacity(JNIEnv* env, jclass cls)) {
   return InstanceSwissTableBufferKlass::cast(vmClasses::FastArrayList_klass())->max_capacity();
 } JVM_END
 
+JVM_ENTRY(jlong, FastArrayList_forwardTag(JNIEnv* env, jclass cls)) {
+  return InstanceSwissTableBufferKlass::fast_list_forward_tag();
+} JVM_END
+
+JVM_ENTRY(void, FastArrayList_storeForward0(JNIEnv* env, jclass cls, jobject list, jobject storage)) {
+  InstanceSwissTableBufferKlass::store_fast_list_forward(JNIHandles::resolve_non_null(list),
+                                                         JNIHandles::resolve_non_null(storage));
+} JVM_END
+
 #define CC (char*)
 #define FN_PTR(f) CAST_FROM_FN_PTR(void*, &f)
 
@@ -226,6 +259,8 @@ static JNINativeMethod java_util_FastArrayList_methods[] = {
   {CC "allocate",    CC "(I)Ljava/util/FastArrayList;", FN_PTR(FastArrayList_allocate)},
   {CC "dataBase",    CC "()I",                          FN_PTR(FastArrayList_dataBase)},
   {CC "maxCapacity", CC "()I",                          FN_PTR(FastArrayList_maxCapacity)},
+  {CC "forwardTag",  CC "()J",                          FN_PTR(FastArrayList_forwardTag)},
+  {CC "storeForward0", CC "(Ljava/util/FastArrayList;Ljava/util/FastArrayList;)V", FN_PTR(FastArrayList_storeForward0)},
 };
 
 #undef CC

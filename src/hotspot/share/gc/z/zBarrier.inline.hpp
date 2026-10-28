@@ -92,8 +92,11 @@ inline void ZBarrier::self_heal(ZBarrierFastPath fast_path, volatile zpointer* p
 
     assert_transition_monotonicity(ptr, heal_ptr);
 
-    // Heal
-    const zpointer prev_ptr = Atomic::cmpxchg(p, ptr, heal_ptr, memory_order_relaxed);
+    // Heal. The tag of the storage in slot 0 of a java.util.FastArrayList that forwards
+    // (ZPointerReserved0, ZBarrierSet::fast_list_forward_tag) stays: the colors change, the reference
+    // does not (a heal to null, which only reference processing does, drops it).
+    const uintptr_t tag = is_null_any(heal_ptr) ? 0 : (untype(ptr) & ZPointerReserved0);
+    const zpointer prev_ptr = Atomic::cmpxchg(p, ptr, zpointer(untype(heal_ptr) | tag), memory_order_relaxed);
     if (prev_ptr == ptr) {
       // Success
       return;

@@ -1124,6 +1124,7 @@ class Compile : public Phase {
   // That data forms one alias class per class, like the elements of an array: only Unsafe accesses
   // reach it, at offsets that are not constant (of varying sizes in a table), and no field overlaps it.
   bool is_swiss_table_buffer_data(const TypePtr* adr_type) const;
+  int  swiss_table_buffer_data_base(ciInstanceKlass* ik) const;
   // ik is java.util.SwissTableBuffer or java.util.FastArrayList.
   bool is_swiss_table_buffer_klass(ciInstanceKlass* ik) const;
 

@@ -41,6 +41,12 @@ public:
 
   static void clone_obj_array(objArrayOop src, objArrayOop dst);
 
+  // java.util.FastArrayList with slot 0 forwarding (InstanceSwissTableBufferKlass::fast_list_forward_tag):
+  // the reserved bit of a zpointer that marks the storage in slot 0 of a list object that forwards,
+  // and the store of a tagged reference.
+  static uintptr_t fast_list_forward_tag();
+  static void store_tagged_oop_field(oop base, ptrdiff_t offset, oop value, uintptr_t tag);
+
   virtual void on_thread_create(Thread* thread);
   virtual void on_thread_destroy(Thread* thread);
   virtual void on_thread_attach(Thread* thread);

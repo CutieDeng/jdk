@@ -22,6 +22,8 @@
  */
 
 #include "precompiled.hpp"
+#include "gc/z/zAddress.inline.hpp"
+#include "gc/z/zBarrier.inline.hpp"
 #include "gc/z/zBarrierSet.hpp"
 #include "gc/z/zBarrierSetAssembler.hpp"
 #include "gc/z/zBarrierSetNMethod.hpp"
@@ -164,6 +166,20 @@ void ZBarrierSet::clone_obj_array(objArrayOop src_obj, objArrayOop dst_obj) {
     ZBarrier::store_barrier_on_heap_oop_field(dst, false /* heal */);
     Atomic::store(dst, ZAddress::store_good(elem));
   }
+}
+
+uintptr_t ZBarrierSet::fast_list_forward_tag() {
+  return ZPointerReserved0;
+}
+
+void ZBarrierSet::store_tagged_oop_field(oop base, ptrdiff_t offset, oop value, uintptr_t tag) {
+  assert(tag != 0 && (tag & ~ZPointerReservedMask) == 0, "a reserved bit");
+  volatile zpointer* const p = (volatile zpointer*)base->field_addr<zpointer>((int)offset);
+  // As the runtime stores a reference (oop_store_in_heap): the store barrier on the previous value,
+  // then a store good pointer, here with the tag, in one store, so that no thread sees the value
+  // without it.
+  ZBarrier::store_barrier_on_heap_oop_field(p, false /* heal */);
+  Atomic::release_store(p, to_zpointer(untype(ZAddress::store_good(to_zaddress(value))) | tag));
 }
 
 void ZBarrierSet::print_on(outputStream* st) const {

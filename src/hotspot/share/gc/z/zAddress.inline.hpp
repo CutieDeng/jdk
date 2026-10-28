@@ -235,7 +235,9 @@ inline bool is_valid(zpointer ptr, bool assert_on_failure = false) {
     return false;
   }
 
-  if ((value & ZPointerReservedMask) != 0) {
+  // ZPointerReserved0 tags the storage in slot 0 of a java.util.FastArrayList that forwards
+  // (ZBarrierSet::fast_list_forward_tag); the other reserved bits are never set
+  if ((value & (ZPointerReservedMask & ~ZPointerReserved0)) != 0) {
     report_is_valid_failure("Dirty reserved bits");
     return false;
   }
