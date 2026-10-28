@@ -60,6 +60,9 @@ final class SwissTableBuffer {
     /** The largest capacity the VM allocates. */
     static native int maxCapacity();
 
+    /** -XX:SwissTablePurgeMinReclaim: 32nds of its slots a purge in place must free (0 to 28). */
+    static native int purgeMinReclaim();
+
     private static native void registerNatives();
 
     static {

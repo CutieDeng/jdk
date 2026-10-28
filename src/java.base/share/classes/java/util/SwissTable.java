@@ -107,6 +107,12 @@ final class SwissTable<K,V> extends HashMap<K,V> {
      */
     static final int FIRST_CAPACITY = 2 * GROUP;
     static final int MAX_CAPACITY = SwissTableBuffer.maxCapacity();
+    /**
+     * A table out of growth purges in place while at most this many 32nds of its slots are full,
+     * so that the purge frees at least 28 minus as many (-XX:SwissTablePurgeMinReclaim); fuller
+     * tables double. A constant to the JIT: growForInsert compiles only the comparison.
+     */
+    static final int PURGE_MAX_LOAD_32NDS = 28 - SwissTableBuffer.purgeMinReclaim();
     static final byte EMPTY = 0x00;
     static final byte DELETED = 0x01;
     static final long HIGH_BITS = 0x8080808080808080L;
@@ -623,10 +629,12 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         int cap = t.capacity;
         if (cap == 0) {
             return buf = newTable(FIRST_CAPACITY, t.aux);
-        } else if ((long) size * 32 <= (long) cap * 25) {
-            // Abseil's rule: at most 25/32 full, purge the tombstones in place rather than grow,
-            // so that a steady size under removes and inserts never grows the table. The purge
-            // leaves at least 3/32 of the slots as growth, which bounds its amortized cost.
+        } else if ((long) size * 32 <= (long) cap * PURGE_MAX_LOAD_32NDS) {
+            // By default (-XX:SwissTablePurgeMinReclaim=3) Abseil's rule: at most 25/32 full,
+            // purge the tombstones in place rather than grow, so that a steady size under removes
+            // and inserts never grows the table. The purge leaves at least 3/32 of the slots as
+            // growth, which bounds its amortized cost. A larger minimum makes a table whose purge
+            // would free less double instead (14: hashbrown's rule, at most 7/16 full).
             purgeInPlace(t);
             return t;
         } else if (cap < MAX_CAPACITY) {

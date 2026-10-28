@@ -127,6 +127,10 @@ JVM_ENTRY(jint, SwissTableBuffer_maxCapacity(JNIEnv* env, jclass cls)) {
   return InstanceSwissTableBufferKlass::max_capacity();
 } JVM_END
 
+JVM_ENTRY(jint, SwissTableBuffer_purgeMinReclaim(JNIEnv* env, jclass cls)) {
+  return (jint) SwissTablePurgeMinReclaim;
+} JVM_END
+
 #define CC (char*)
 #define FN_PTR(f) CAST_FROM_FN_PTR(void*, &f)
 
@@ -134,6 +138,7 @@ static JNINativeMethod java_util_SwissTableBuffer_methods[] = {
   {CC "allocate",    CC "(I)Ljava/util/SwissTableBuffer;", FN_PTR(SwissTableBuffer_allocate)},
   {CC "ctrlBase",    CC "()I",                       FN_PTR(SwissTableBuffer_ctrlBase)},
   {CC "maxCapacity", CC "()I",                       FN_PTR(SwissTableBuffer_maxCapacity)},
+  {CC "purgeMinReclaim", CC "()I",                   FN_PTR(SwissTableBuffer_purgeMinReclaim)},
 };
 
 #undef CC

@@ -180,6 +180,13 @@ const int ObjectAlignmentInBytes = 8;
           "control bytes, SIMD group probing); getClass() still "           \
           "reports HashMap")                                                \
                                                                             \
+  product(uint, SwissTablePurgeMinReclaim, 3, EXPERIMENTAL,                 \
+          "A swiss table out of growth purges its tombstones in place "     \
+          "only if that frees at least this many 32nds of its slots, "      \
+          "and doubles otherwise: 3 is Abseil's rule (at most 25/32 "       \
+          "full), 14 hashbrown's (at most half of the 7/8 load limit)")     \
+          range(0, 28)                                                      \
+                                                                            \
   product(bool, UnlockDiagnosticVMOptions, trueInDebug, DIAGNOSTIC,         \
           "Enable normal processing of flags relating to field diagnostics")\
                                                                             \
