@@ -36,6 +36,7 @@ import java.util.function.Function;
 import jdk.internal.access.SharedSecrets;
 import jdk.internal.misc.Unsafe;
 import jdk.internal.vm.annotation.DontInline;
+import jdk.internal.vm.annotation.ForceInline;
 import jdk.internal.vm.annotation.IntrinsicCandidate;
 
 /**
@@ -592,7 +593,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
                 if (t.capacity < MAX_CAPACITY) {
                     // Inserts keep 1/8 of the slots free below the largest capacity, so only
                     // unsynchronized concurrent writers fill a table: rebuild larger, count again.
-                    SwissTableBuffer n = rehash(t.capacity << 1);
+                    SwissTableBuffer n = rehash(t, t.capacity << 1);
                     size = growthFor(n.capacity) - n.growthLeft;
                     insertNew(key, value, p);
                     return;
@@ -629,7 +630,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
             purgeInPlace(t);
             return t;
         } else if (cap < MAX_CAPACITY) {
-            return rehash(cap << 1);
+            return rehash(t, cap << 1);
         } else {
             return t;
         }
@@ -691,11 +692,14 @@ final class SwissTable<K,V> extends HashMap<K,V> {
     }
 
     /**
-     * Rebuild into a fresh table of {@code newCap} slots: walk the old groups' full lanes and put
-     * each pair into the first free slot of its probe in the new table, which has no DELETED slots.
+     * Rebuild t, the table the caller sized newCap from, into a fresh table of {@code newCap}
+     * slots: walk t's full lanes and put each pair into the first free slot of its probe in the new
+     * table, which has no DELETED slots. Without races t is buf. With unsynchronized writers buf may
+     * already be another, larger table; rebuilding t keeps every newCap above its full slots, and
+     * the other writers' inserts are lost, as in HashMap.resize().
      */
-    private SwissTableBuffer rehash(int newCap) {
-        return buf = rehashed(buf, newCap);
+    private SwissTableBuffer rehash(SwissTableBuffer t, int newCap) {
+        return buf = rehashed(t, newCap);
     }
 
     /**
@@ -738,7 +742,7 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         int need = capacityFor(n);
         SwissTableBuffer t = buf;
         if (need > t.capacity) {
-            if (t.capacity == 0) buf = newTable(need, t.aux); else rehash(need);
+            if (t.capacity == 0) buf = newTable(need, t.aux); else rehash(t, need);
         }
     }
 
@@ -1228,8 +1232,9 @@ final class SwissTable<K,V> extends HashMap<K,V> {
 
     /**
      * Walks the full slots of the table current at creation, group by group.
-     * Like hashbrown's RawIter, it counts the slots still to return: hasNext() is a counter test,
-     * and the walk stops at the last full slot instead of scanning the empty groups after it.
+     * Like hashbrown's RawIter, it counts the slots still to return: hasNext() is a counter test
+     * while group g has lanes left, and the walk stops at the last full slot instead of scanning
+     * the empty groups after it.
      */
     abstract class SlotIterator<E> implements Iterator<E> {
         final SwissTableBuffer table = buf;
@@ -1240,17 +1245,33 @@ final class SwissTable<K,V> extends HashMap<K,V> {
         private int current = -1;                       // key offset of the last slot returned
         private int expectedModCount = modCount;
 
-        public final boolean hasNext() { return remaining != 0; }
+        public final boolean hasNext() { return remaining != 0 && (bits != 0 || advance()); }
+
+        /**
+         * Move g to the next group with a full slot and take its lanes. The end of the table comes
+         * first only after unsynchronized writers counted more mappings than they placed; the walk
+         * then ends there, as HashMap's iterator ends at its last node whatever its size says.
+         * Force-inlined: C2 left this call out of hasNext(), the iterator escaped into it, and a
+         * for-each over 16 mappings allocated it (48 bytes) and took 85.7 instead of 28.9 ns.
+         */
+        @ForceInline
+        private boolean advance() {
+            for (int groups = cap >>> 3; ++g < groups; ) {
+                long b = matchFull(ctrlWord(table, g));
+                if (b != 0) {
+                    bits = b;
+                    return true;
+                }
+            }
+            remaining = 0;
+            return false;
+        }
 
         /** Key offset of the next full slot (its value is at + REF_SIZE). */
         final int nextOff() {
             if (modCount != expectedModCount) throw new ConcurrentModificationException();
-            if (remaining == 0) throw new NoSuchElementException();
+            if (remaining == 0 || (bits == 0 && !advance())) throw new NoSuchElementException();
             long b = bits;
-            while (b == 0) {                              // the next group with a full slot
-                if (++g >= (cap >>> 3)) throw new ConcurrentModificationException();   // fewer than counted
-                b = matchFull(ctrlWord(table, g));
-            }
             int off = laneOff(cap, g, b);
             bits = b & (b - 1);
             remaining--;
