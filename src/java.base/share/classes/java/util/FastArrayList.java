@@ -110,11 +110,12 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     private static final boolean FWD_IN_WORD;
     /**
      * Whether slot 0 holds the storage of a list object that forwards, and fwd is slot 0 (with
-     * generational ZGC, which has no compressed oops: 8 bytes less per list object). The storage is
-     * tagged there: a reserved bit of the raw reference (FWD_TAG), which no element store sets and the
-     * collector keeps. Slot 0 is written only where it does not hold the storage (putSlot0: a CAS, or
-     * C2's test and store in one instruction, which a racing move can overtake and the VM then
-     * repairs, repairForward0), and by storeForward0.
+     * generational ZGC, which has no compressed oops, and -XX:+FastListSlot0Forwarding: 8 bytes less
+     * per list object, slower set and growth). The storage is tagged there: a reserved bit of the raw
+     * reference (FWD_TAG), which no element store sets and the collector keeps. Slot 0 is written
+     * only where it does not hold the storage (putSlot0: a CAS, or C2's test and store in one
+     * instruction, which a racing move can overtake and the VM then repairs, repairForward0), and by
+     * storeForward0.
      */
     private static final boolean SLOT0;
     /** With SLOT0, the tag bit of slot 0's raw word; else 0. */
