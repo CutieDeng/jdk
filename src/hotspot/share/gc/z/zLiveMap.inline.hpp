@@ -119,6 +119,14 @@ inline bool ZLiveMap::set(ZGenerationId id, BitMap::idx_t index, bool finalizabl
   return _bitmap.par_set_bit_pair(index, finalizable, inc_live);
 }
 
+inline size_t ZLiveMap::fold_bytes() const {
+  return _fold_bytes;
+}
+
+inline void ZLiveMap::inc_fold_bytes(size_t bytes) {
+  Atomic::add(&_fold_bytes, bytes);
+}
+
 inline void ZLiveMap::inc_live(uint32_t objects, size_t bytes) {
   Atomic::add(&_live_objects, objects);
   Atomic::add(&_live_bytes, bytes);

@@ -56,7 +56,8 @@
 // decides it and tags O (size fast_list_folding); phase 2 gives O no space; when the new addresses
 // are known O is forwarded to the new address of S, so that phase 3 adjusts every reference to O
 // (strong and weak roots, references, the preserved mark of O, which carries its identity hash);
-// then O is made a dead object for phase 4. Parallel's full collection does not fold.
+// then O is made a dead object for phase 4. Parallel's full collection does not fold. Generational
+// ZGC folds when it relocates O: gc/z/zFastArrayListFolding.inline.hpp.
 class FastArrayListFolding : AllStatic {
   static volatile size_t _folds;
 

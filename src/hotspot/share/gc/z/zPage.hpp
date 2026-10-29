@@ -159,6 +159,9 @@ public:
   bool mark_object(zaddress addr, bool finalizable, bool& inc_live);
 
   void inc_live(uint32_t objects, size_t bytes);
+  // Bytes of live java.util.FastArrayLists that marking leaves out of the live bytes, so that
+  // relocation folds them (zMark.cpp, zRelocate.cpp)
+  void inc_fold_bytes(size_t bytes);
   uint32_t live_objects() const;
   size_t live_bytes() const;
 
@@ -217,7 +220,7 @@ public:
   // Verification
   bool was_remembered(volatile zpointer* p);
   bool is_remembered(volatile zpointer* p);
-  void verify_live(uint32_t live_objects, size_t live_bytes, bool in_place) const;
+  void verify_live(uint32_t live_objects, size_t live_bytes, size_t folded_bytes, bool in_place) const;
 
   void fatal_msg(const char* msg) const;
 };

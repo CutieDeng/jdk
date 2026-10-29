@@ -35,6 +35,7 @@
 #include "gc/z/zAddress.inline.hpp"
 #include "gc/z/zBarrier.inline.hpp"
 #include "gc/z/zBarrierSetNMethod.hpp"
+#include "gc/z/zFastArrayListFolding.inline.hpp"
 #include "gc/z/zGeneration.inline.hpp"
 #include "gc/z/zGenerationId.hpp"
 #include "gc/z/zHeap.inline.hpp"
@@ -481,13 +482,20 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
   }
 
   // Increment live
+  size_t fold_size = 0;
   if (inc_live) {
     // Update live objects/bytes for page. We use the aligned object
     // size since that is the actual number of bytes used on the page
     // and alignment paddings can never be reclaimed.
     const size_t size = ZUtils::object_size(addr);
     const size_t aligned_size = align_up(size, page->object_alignment());
-    context->cache()->inc_live(page, aligned_size);
+    if (ZFastArrayListFolding::is_forwarding_list(addr)) {
+      // A java.util.FastArrayList that relocation may fold: decided below, when following it has
+      // healed its reference to its storage
+      fold_size = aligned_size;
+    } else {
+      context->cache()->inc_live(page, aligned_size);
+    }
   }
 
   // Follow
@@ -504,6 +512,16 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
         // Try deduplicate
         try_deduplicate(context, obj);
       }
+    }
+  }
+
+  if (fold_size != 0) {
+    if (ZFastArrayListFolding::mark_excludes(addr, page)) {
+      // Live, but not in the live bytes: relocation folds it into its storage
+      page->inc_fold_bytes(fold_size);
+      context->cache()->inc_live(page, 0);
+    } else {
+      context->cache()->inc_live(page, fold_size);
     }
   }
 }

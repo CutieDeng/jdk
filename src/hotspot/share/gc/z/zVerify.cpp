@@ -719,6 +719,11 @@ void ZVerify::after_relocation_internal(ZForwarding* forwarding) {
   ZVerifyRemsetAfterOopClosure cl(forwarding);
 
   forwarding->address_unsafe_iterate_via_table([&](zaddress_unsafe from_addr) {
+    if (forwarding->is_fold(from_addr)) {
+      // A java.util.FastArrayList folded into its storage, which was not copied here
+      return;
+    }
+
     // If no field in this object was in the store barrier buffer
     // when relocation started, we should be able to verify trivially
     ZGeneration* const from_generation = forwarding->from_age() == ZPageAge::old ? (ZGeneration*)ZGeneration::old()

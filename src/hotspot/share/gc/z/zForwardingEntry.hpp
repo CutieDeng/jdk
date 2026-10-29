@@ -27,6 +27,7 @@
 #include "gc/z/zBitField.hpp"
 #include "memory/allocation.hpp"
 #include "metaprogramming/primitiveConversions.hpp"
+#include "utilities/debug.hpp"
 
 #include <type_traits>
 
@@ -46,6 +47,11 @@
 //  |
 //  * 63-46 From Object Index (18-bits)
 //
+// Bit 1, the lowest bit of the to-offset, which is 0 for an object (objects are 8-byte aligned), is
+// the fold flag: the from-object, a java.util.FastArrayList that forwards, was not copied but folded
+// into its storage (FastListFolding), the object at the to-offset, which is not in a to-space page
+// of this relocation and which other entries may forward to as well.
+//
 
 class ZForwardingEntry {
   friend struct PrimitiveConversions::Translate<ZForwardingEntry>;
@@ -62,17 +68,23 @@ public:
   ZForwardingEntry()
     : _entry(0) {}
 
-  ZForwardingEntry(size_t from_index, size_t to_offset)
+  ZForwardingEntry(size_t from_index, size_t to_offset, bool fold = false)
     : _entry(field_populated::encode(true) |
-             field_to_offset::encode(to_offset) |
-             field_from_index::encode(from_index)) {}
+             field_to_offset::encode(to_offset | (fold ? 1 : 0)) |
+             field_from_index::encode(from_index)) {
+    assert((to_offset & 1) == 0, "an object offset");
+  }
 
   bool populated() const {
     return field_populated::decode(_entry);
   }
 
   size_t to_offset() const {
-    return field_to_offset::decode(_entry);
+    return field_to_offset::decode(_entry) & ~(size_t)1;
+  }
+
+  bool is_fold() const {
+    return (field_to_offset::decode(_entry) & 1) != 0;
   }
 
   size_t from_index() const {

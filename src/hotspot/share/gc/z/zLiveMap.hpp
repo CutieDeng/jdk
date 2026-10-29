@@ -40,6 +40,7 @@ private:
   volatile uint32_t _seqnum;
   volatile uint32_t _live_objects;
   volatile size_t   _live_bytes;
+  volatile size_t   _fold_bytes;     // not in _live_bytes: java.util.FastArrayLists to fold (zMark.cpp)
   BitMap::bm_word_t _segment_live_bits;
   BitMap::bm_word_t _segment_claim_bits;
   ZBitMap           _bitmap;
@@ -89,6 +90,9 @@ public:
   bool set(ZGenerationId id, BitMap::idx_t index, bool finalizable, bool& inc_live);
 
   void inc_live(uint32_t objects, size_t bytes);
+
+  size_t fold_bytes() const;
+  void inc_fold_bytes(size_t bytes);
 
   template <typename Function>
   void iterate(ZGenerationId id, Function function);

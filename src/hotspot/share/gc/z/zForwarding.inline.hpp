@@ -72,6 +72,7 @@ inline ZForwarding::ZForwarding(ZPage* page, ZPageAge to_age, size_t nentries)
     _relocated_remembered_fields_publish_young_seqnum(0),
     _in_place(false),
     _in_place_top_at_start(),
+    _folded_bytes(0),
     _in_place_thread(nullptr) {}
 
 inline ZPageType ZForwarding::type() const {
@@ -244,7 +245,11 @@ inline ZForwardingEntry ZForwarding::find(uintptr_t from_index, ZForwardingCurso
 }
 
 inline zoffset ZForwarding::insert(uintptr_t from_index, zoffset to_offset, ZForwardingCursor* cursor) {
-  const ZForwardingEntry new_entry(from_index, untype(to_offset));
+  return to_zoffset(insert_entry(from_index, to_offset, false /* fold */, cursor, nullptr).to_offset());
+}
+
+inline ZForwardingEntry ZForwarding::insert_entry(uintptr_t from_index, zoffset to_offset, bool fold, ZForwardingCursor* cursor, bool* inserted) {
+  const ZForwardingEntry new_entry(from_index, untype(to_offset), fold);
   const ZForwardingEntry old_entry; // Empty
 
   // Make sure that object copy is finished
@@ -255,20 +260,38 @@ inline zoffset ZForwarding::insert(uintptr_t from_index, zoffset to_offset, ZFor
     const ZForwardingEntry prev_entry = Atomic::cmpxchg(entries() + *cursor, old_entry, new_entry, memory_order_relaxed);
     if (!prev_entry.populated()) {
       // Success
-      return to_offset;
+      if (inserted != nullptr) {
+        *inserted = true;
+      }
+      return new_entry;
     }
 
     // Find next empty or matching entry
     ZForwardingEntry entry = at(cursor);
     while (entry.populated()) {
       if (entry.from_index() == from_index) {
-        // Match found, return already inserted address
-        return to_zoffset(entry.to_offset());
+        // Match found, return already inserted entry
+        if (inserted != nullptr) {
+          *inserted = false;
+        }
+        return entry;
       }
 
       entry = next(cursor);
     }
   }
+}
+
+inline bool ZForwarding::is_fold(zaddress_unsafe addr) const {
+  const uintptr_t from_index = (ZAddress::offset(addr) - start()) >> object_alignment_shift();
+  ZForwardingCursor cursor;
+  const ZForwardingEntry entry = find(from_index, &cursor);
+  assert(entry.populated(), "Should be forwarded");
+  return entry.is_fold();
+}
+
+inline void ZForwarding::add_folded_bytes(size_t bytes) {
+  Atomic::add(&_folded_bytes, bytes, memory_order_relaxed);
 }
 
 inline void ZForwarding::relocated_remembered_fields_register(volatile zpointer* p) {

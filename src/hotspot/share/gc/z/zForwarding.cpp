@@ -133,6 +133,22 @@ void ZForwarding::in_place_relocation_claim_page() {
   }
 }
 
+bool ZForwarding::try_retain_page() {
+  for (;;) {
+    const int32_t ref_count = Atomic::load_acquire(&_ref_count);
+
+    if (ref_count <= 0) {
+      // Released, or claimed
+      return false;
+    }
+
+    if (Atomic::cmpxchg(&_ref_count, ref_count, ref_count + 1) == ref_count) {
+      // Retained
+      return true;
+    }
+  }
+}
+
 void ZForwarding::release_page() {
   for (;;) {
     const int32_t ref_count = Atomic::load(&_ref_count);
@@ -385,7 +401,8 @@ void ZForwarding::verify() const {
     // Check from index
     guarantee(entry.from_index() < _page->object_max_count(), "Invalid from index");
 
-    // Check for duplicates
+    // Check for duplicates. Fold entries forward to the storage of a list, outside the to-space of
+    // this relocation, which another entry may forward to as well (the storage, relocated first).
     for (ZForwardingCursor j = i + 1; j < _entries.length(); j++) {
       const ZForwardingEntry other = at(&j);
       if (!other.populated()) {
@@ -394,16 +411,21 @@ void ZForwarding::verify() const {
       }
 
       guarantee(entry.from_index() != other.from_index(), "Duplicate from");
-      guarantee(entry.to_offset() != other.to_offset(), "Duplicate to");
+      guarantee(entry.is_fold() || other.is_fold() || entry.to_offset() != other.to_offset(), "Duplicate to");
+    }
+
+    live_objects++;
+    if (entry.is_fold()) {
+      // Not copied: no bytes in to-space
+      continue;
     }
 
     const zaddress to_addr = ZOffset::address(to_zoffset(entry.to_offset()));
     const size_t size = ZUtils::object_size(to_addr);
     const size_t aligned_size = align_up(size, _page->object_alignment());
     live_bytes += aligned_size;
-    live_objects++;
   }
 
   // Verify number of live objects and bytes
-  _page->verify_live(live_objects, live_bytes, _in_place);
+  _page->verify_live(live_objects, live_bytes, Atomic::load(&_folded_bytes), _in_place);
 }

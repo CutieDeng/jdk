@@ -318,6 +318,10 @@ inline bool ZPage::mark_object(zaddress addr, bool finalizable, bool& inc_live) 
   return _livemap.set(_generation_id, index, finalizable, inc_live);
 }
 
+inline void ZPage::inc_fold_bytes(size_t bytes) {
+  _livemap.inc_fold_bytes(bytes);
+}
+
 inline void ZPage::inc_live(uint32_t objects, size_t bytes) {
   _livemap.inc_live(objects, bytes);
 }

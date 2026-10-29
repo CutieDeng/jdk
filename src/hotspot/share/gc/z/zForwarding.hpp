@@ -75,6 +75,9 @@ private:
   bool                   _in_place;
   zoffset_end            _in_place_top_at_start;
 
+  // Bytes of the java.util.FastArrayLists folded instead of copied (fold entries), for verify()
+  volatile size_t        _folded_bytes;
+
   // Debugging
   volatile Thread*       _in_place_thread;
 
@@ -132,6 +135,9 @@ public:
   bool in_place_relocation_is_below_top_at_start(zoffset addr) const;
 
   bool retain_page(ZRelocateQueue* queue);
+  // retain_page without waiting: false if the page is released (relocated) or claimed for in-place
+  // relocation
+  bool try_retain_page();
   void release_page();
 
   ZPage* detach_page();
@@ -144,6 +150,13 @@ public:
 
   ZForwardingEntry find(uintptr_t from_index, ZForwardingCursor* cursor) const;
   zoffset insert(uintptr_t from_index, zoffset to_offset, ZForwardingCursor* cursor);
+  // insert, which answers the entry in the table: the new one (inserted, if not null, set), or one
+  // that another thread inserted first; fold: an entry of a folded java.util.FastArrayList
+  // (ZForwardingEntry::is_fold)
+  ZForwardingEntry insert_entry(uintptr_t from_index, zoffset to_offset, bool fold, ZForwardingCursor* cursor, bool* inserted);
+  // Whether the entry of addr, which has one, is a fold
+  bool is_fold(zaddress_unsafe addr) const;
+  void add_folded_bytes(size_t bytes);
 
   // Relocated remembered set fields support
   void relocated_remembered_fields_register(volatile zpointer* p);

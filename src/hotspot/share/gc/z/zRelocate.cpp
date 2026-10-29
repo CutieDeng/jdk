@@ -22,6 +22,7 @@
  */
 
 #include "precompiled.hpp"
+#include "gc/shared/fastArrayListFolding.hpp"
 #include "gc/shared/gc_globals.hpp"
 #include "gc/shared/suspendibleThreadSet.hpp"
 #include "gc/z/zAbort.inline.hpp"
@@ -29,6 +30,7 @@
 #include "gc/z/zAllocator.inline.hpp"
 #include "gc/z/zBarrier.inline.hpp"
 #include "gc/z/zCollectedHeap.hpp"
+#include "gc/z/zFastArrayListFolding.inline.hpp"
 #include "gc/z/zForwarding.inline.hpp"
 #include "gc/z/zGeneration.inline.hpp"
 #include "gc/z/zHeap.inline.hpp"
@@ -68,6 +70,14 @@ static zaddress forwarding_find(ZForwarding* forwarding, zaddress_unsafe from_ad
 
 static zaddress forwarding_find(ZForwarding* forwarding, zaddress from_addr, ZForwardingCursor* cursor) {
   return forwarding_find(forwarding, ZAddress::offset(from_addr), cursor);
+}
+
+static ZForwardingEntry forwarding_find_entry(ZForwarding* forwarding, zaddress from_addr, ZForwardingCursor* cursor) {
+  return forwarding->find(forwarding_index(forwarding, ZAddress::offset(from_addr)), cursor);
+}
+
+static zaddress forwarding_to_address(ZForwardingEntry entry) {
+  return ZOffset::address(to_zoffset(entry.to_offset()));
 }
 
 static zaddress forwarding_insert(ZForwarding* forwarding, zoffset from_offset, zaddress to_addr, ZForwardingCursor* cursor) {
@@ -378,6 +388,115 @@ static zaddress relocate_object_inner(ZForwarding* forwarding, zaddress from_add
   return to_addr_final;
 }
 
+// The final address of the storage of a java.util.FastArrayList that ptr, the list's reference to it,
+// refers to, for a fold (ZFastArrayListFolding): one that no relocation of either generation moves,
+// so that references remapped to it are good. Null if there is none without waiting: the
+// relocation of the other generation is still to move the storage, its page is claimed for in-place
+// relocation, or there is no memory to move it. relocation: the generation that relocates the list.
+static zaddress fast_list_fold_target(zpointer ptr, ZGeneration* relocation) {
+  if (ZPointer::is_load_good(ptr)) {
+    return ZPointer::uncolor(ptr);
+  }
+
+  const zaddress_unsafe addr = ZPointer::uncolor_unsafe(ptr);
+  ZGeneration* const generation = ZBarrier::remap_generation(ptr);
+  ZForwarding* const forwarding = generation->forwarding(addr);
+  if (forwarding == nullptr) {
+    // Not in a relocation set
+    return safe(addr);
+  }
+
+  ZForwardingCursor cursor;
+  const zaddress to_addr = forwarding_find(forwarding, addr, &cursor);
+  if (!is_null(to_addr)) {
+    // Already relocated
+    return to_addr;
+  }
+
+  if (generation != relocation || !forwarding->try_retain_page()) {
+    return zaddress::null;
+  }
+
+  // Relocate it now, as a mutator would (the worker of its page updates its remembered set)
+  const zaddress relocated = relocate_object_inner(forwarding, safe(addr), &cursor);
+  forwarding->release_page();
+  return relocated;
+}
+
+// Whether target can take the identity of a list with mark m, which is unlocked: target is
+// unlocked, and gets the identity hash of the list, if it has one, unless it has it already.
+static bool fast_list_take_identity(markWord m, oop target) {
+  markWord t = target->mark_acquire();
+  for (;;) {
+    if (!t.is_unlocked()) {
+      return false;
+    }
+    if (m.has_no_hash()) {
+      return true;
+    }
+    if (!t.has_no_hash()) {
+      return t.hash() == m.hash();
+    }
+    const markWord prev = target->cas_set_mark(t.copy_set_hash(m.hash()), t);
+    if (prev == t) {
+      return true;
+    }
+    t = prev;
+  }
+}
+
+// Folds the java.util.FastArrayList at from_addr, in the page of forwarding, if it forwards
+// (ZFastArrayListFolding): forwards it to the final address of its storage with a fold entry.
+// Answers its entry (the fold, or an entry another thread inserted first), or an empty entry: the
+// object is to be copied. A list folds only if
+//   - it is unlocked (its mark is in place), and the storage can take its identity hash;
+//   - the storage holds the elements (size >= 0: not retired) and is at least as large as the
+//     list: the store barrier buffers remap a field of the list to the same offset in the storage;
+//   - the list is young or the storage old: references from old objects to an old list are not in
+//     the remembered set, which a young storage would need.
+static ZForwardingEntry fast_list_fold(ZForwarding* forwarding, zaddress from_addr, ZForwardingCursor* cursor) {
+  if (!ZFastArrayListFolding::is_forwarding_list(from_addr)) {
+    return ZForwardingEntry();
+  }
+
+  const oop list = to_oop(from_addr);
+  const markWord m = list->mark();
+  if (!m.is_unlocked()) {
+    return ZForwardingEntry();
+  }
+
+  const zpointer ptr = ZFastArrayListFolding::storage_pointer(from_addr);
+  if (is_null_any(ptr)) {
+    return ZForwardingEntry();
+  }
+
+  const bool old_list = forwarding->from_age() == ZPageAge::old;
+  ZGeneration* const relocation = old_list ? (ZGeneration*)ZGeneration::old() : (ZGeneration*)ZGeneration::young();
+  const zaddress to_addr = fast_list_fold_target(ptr, relocation);
+  if (is_null(to_addr) || to_addr == from_addr) {
+    return ZForwardingEntry();
+  }
+
+  const oop storage = to_oop(to_addr);
+  const size_t size = ZUtils::object_size(from_addr);
+  if (storage->klass() != list->klass() ||
+      Atomic::load(storage->field_addr<jint>(InstanceSwissTableBufferKlass::fast_list_size_offset())) < 0 ||
+      ZUtils::object_size(to_addr) < size ||
+      (old_list && !ZHeap::heap()->is_old(to_addr)) ||
+      !fast_list_take_identity(m, storage)) {
+    return ZForwardingEntry();
+  }
+
+  bool inserted = false;
+  const ZForwardingEntry entry = forwarding->insert_entry(forwarding_index(forwarding, ZAddress::offset(from_addr)),
+                                                          ZAddress::offset(to_addr), true /* fold */, cursor, &inserted);
+  if (inserted) {
+    forwarding->add_folded_bytes(align_up(size, (size_t)1 << forwarding->object_alignment_shift()));
+    FastArrayListFolding::count_fold();
+  }
+  return entry;
+}
+
 zaddress ZRelocate::relocate_object(ZForwarding* forwarding, zaddress_unsafe from_addr) {
   ZForwardingCursor cursor;
 
@@ -391,6 +510,13 @@ zaddress ZRelocate::relocate_object(ZForwarding* forwarding, zaddress_unsafe fro
   // Relocate object
   if (forwarding->retain_page(&_queue)) {
     assert(_generation->is_phase_relocate(), "Must be");
+    // Fold a java.util.FastArrayList that forwards
+    const ZForwardingEntry fold = fast_list_fold(forwarding, safe(from_addr), &cursor);
+    if (fold.populated()) {
+      forwarding->release_page();
+      return forwarding_to_address(fold);
+    }
+
     to_addr = relocate_object_inner(forwarding, safe(from_addr), &cursor);
     forwarding->release_page();
 
@@ -618,7 +744,8 @@ private:
     }
   }
 
-  zaddress try_relocate_object_inner(zaddress from_addr) {
+  // fold: set to whether the entry of from_addr is a fold (ZForwardingEntry::is_fold), if found
+  zaddress try_relocate_object_inner(zaddress from_addr, bool* fold) {
     ZForwardingCursor cursor;
 
     const size_t size = ZUtils::object_size(from_addr);
@@ -626,11 +753,26 @@ private:
 
     // Lookup forwarding
     {
-      const zaddress to_addr = forwarding_find(_forwarding, from_addr, &cursor);
-      if (!is_null(to_addr)) {
-        // Already relocated
-        increase_other_forwarded(size);
-        return to_addr;
+      const ZForwardingEntry entry = forwarding_find_entry(_forwarding, from_addr, &cursor);
+      if (entry.populated()) {
+        // Already relocated, or folded
+        *fold = entry.is_fold();
+        if (!*fold) {
+          increase_other_forwarded(size);
+        }
+        return forwarding_to_address(entry);
+      }
+    }
+
+    // Fold a java.util.FastArrayList that forwards
+    {
+      const ZForwardingEntry entry = fast_list_fold(_forwarding, from_addr, &cursor);
+      if (entry.populated()) {
+        *fold = entry.is_fold();
+        if (!*fold) {
+          increase_other_forwarded(size);
+        }
+        return forwarding_to_address(entry);
       }
     }
 
@@ -650,11 +792,16 @@ private:
     }
 
     // Insert forwarding
-    const zaddress to_addr = forwarding_insert(_forwarding, from_addr, allocated_addr, &cursor);
+    const ZForwardingEntry entry = _forwarding->insert_entry(forwarding_index(_forwarding, ZAddress::offset(from_addr)),
+                                                             ZAddress::offset(allocated_addr), false /* fold */, &cursor, nullptr);
+    const zaddress to_addr = forwarding_to_address(entry);
+    *fold = entry.is_fold();
     if (to_addr != allocated_addr) {
-      // Already relocated, undo allocation
+      // Already relocated or folded, undo allocation
       _allocator->undo_alloc_object(to_page, to_addr, size);
-      increase_other_forwarded(size);
+      if (!*fold) {
+        increase_other_forwarded(size);
+      }
     }
 
     return to_addr;
@@ -827,13 +974,17 @@ private:
   }
 
   bool try_relocate_object(zaddress from_addr) {
-    const zaddress to_addr = try_relocate_object_inner(from_addr);
+    bool fold = false;
+    const zaddress to_addr = try_relocate_object_inner(from_addr, &fold);
 
     if (is_null(to_addr)) {
       return false;
     }
 
-    update_remset_for_fields(from_addr, to_addr);
+    if (!fold) {
+      // (a folded list is not copied: its fields are dead, and the storage has its own remset)
+      update_remset_for_fields(from_addr, to_addr);
+    }
 
     return true;
   }
@@ -1245,6 +1396,10 @@ void ZRelocate::relocate(ZRelocationSet* relocation_set) {
     ZRelocateTask relocate_task(relocation_set, &_queue);
     workers()->run(&relocate_task);
   }
+
+  // The java.util.FastArrayLists folded (gc, debug): by workers and by mutators so far, those of a
+  // concurrent relocation of the other generation included
+  FastArrayListFolding::report(_generation->is_young() ? "ZGC young relocation" : "ZGC old relocation");
 
   if (relocation_set->generation()->is_young()) {
     ZRelocateAddRemsetForFlipPromoted task(relocation_set->flip_promoted_pages());

@@ -301,13 +301,15 @@ void ZPage::print() const {
   print_on(tty);
 }
 
-void ZPage::verify_live(uint32_t live_objects, size_t live_bytes, bool in_place) const {
+void ZPage::verify_live(uint32_t live_objects, size_t live_bytes, size_t folded_bytes, bool in_place) const {
   if (!in_place) {
     // In-place relocation has changed the page to allocating
     assert_zpage_mark_state();
   }
   guarantee(live_objects == _livemap.live_objects(), "Invalid number of live objects");
-  guarantee(live_bytes == _livemap.live_bytes(), "Invalid number of live bytes");
+  // Every live object is copied (live_bytes) or, a java.util.FastArrayList, folded (folded_bytes);
+  // marking left some lists out of the live bytes (fold bytes), which relocation folds or copies.
+  guarantee(live_bytes + folded_bytes == _livemap.live_bytes() + _livemap.fold_bytes(), "Invalid number of live bytes");
 }
 
 void ZPage::fatal_msg(const char* msg) const {

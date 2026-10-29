@@ -183,8 +183,9 @@ const int ObjectAlignmentInBytes = 8;
   product(bool, FastListFolding, true, DIAGNOSTIC,                          \
           "Collections replace a java.util.FastArrayList that forwards "   \
           "to its storage by the storage, which then holds its identity: " \
-          "the young collections of Serial, Parallel and G1 (young lists) "\
-          "and the full collections of Serial and G1 (all lists)")         \
+          "the young collections of Serial, Parallel and G1 (young lists), "\
+          "the full collections of Serial and G1 (all lists), and the "    \
+          "relocation of generational ZGC (lists in relocated pages)")     \
                                                                             \
   product(bool, FastListSlot0Forwarding, false, DIAGNOSTIC,                 \
           "With generational ZGC, a java.util.FastArrayList that forwards " \
