@@ -610,6 +610,13 @@ void ConnectionGraph::add_node_to_connection_graph(Node *n, Unique_Node_List *de
       map_ideal_node(n, phantom_obj); // Result is unknown
       break;
     }
+    case Op_FastListForwardee: {
+      // Slot 0 of a java.util.FastArrayList: an object unknown here. The list it reads does not
+      // escape but is not scalar replaceable (see add_final_edges).
+      map_ideal_node(n, phantom_obj);
+      delayed_worklist->push(n); // Process it later.
+      break;
+    }
     case Op_Phi: {
       // Using isa_ptr() instead of isa_oopptr() for LoadP and Phi because
       // ThreadLocal has RawPtr type.
@@ -647,6 +654,7 @@ void ConnectionGraph::add_node_to_connection_graph(Node *n, Unique_Node_List *de
       // fall-through
     }
     case Op_StoreP:
+    case Op_StoreFastListSlot0:
     case Op_StoreN:
     case Op_StoreNKlass:
     case Op_WeakCompareAndSwapP:
@@ -806,6 +814,7 @@ void ConnectionGraph::add_final_edges(Node *n) {
     case Op_WeakCompareAndSwapP:
     case Op_WeakCompareAndSwapN:
     case Op_StoreP:
+    case Op_StoreFastListSlot0:
     case Op_StoreN:
     case Op_StoreNKlass:{
       add_final_edges_unsafe_access(n, opcode);
@@ -837,6 +846,16 @@ void ConnectionGraph::add_final_edges(Node *n) {
           assert(ptn != nullptr, "node should be registered");
           add_edge(n_ptn, ptn);
         }
+      }
+      break;
+    }
+    case Op_FastListForwardee: {
+      // The java.util.FastArrayList whose slot 0 it reads must stay an object.
+      Node* list = n->in(2);
+      if (!list->is_top() && _igvn->type(list)->isa_ptr()) {
+        PointsToNode* ptn = ptnode_adr(list->_idx);
+        assert(ptn != nullptr, "node should be registered");
+        set_escape_state(ptn, PointsToNode::ArgEscape NOT_PRODUCT(COMMA "read by FastListForwardee"));
       }
       break;
     }
@@ -1111,6 +1130,18 @@ void ConnectionGraph::process_call_arguments(CallNode *call) {
       // fall through
     case Op_CallLeafVector:
     case Op_CallLeaf: {
+      if (call->is_CallLeaf() && call->as_CallLeaf()->_name != nullptr &&
+          strcmp(call->as_CallLeaf()->_name, "fast_list_store_forward") == 0) {
+        // java.util.FastArrayList.storeForward0 (LibraryCallKit::inline_fast_list_store_forward): the
+        // storage goes into slot 0 of the list, and both into the moves of the thread
+        for (uint i = TypeFunc::Parms; i < call->tf()->domain()->cnt(); i++) {
+          PointsToNode* arg_ptn = ptnode_adr(call->in(i)->_idx);
+          if (arg_ptn != nullptr) {
+            set_escape_state(arg_ptn, PointsToNode::GlobalEscape NOT_PRODUCT(COMMA "FastArrayList.storeForward0"));
+          }
+        }
+        break;
+      }
       // Stub calls, objects do not escape but they are not scale replaceable.
       // Adjust escape state for outgoing arguments.
       const TypeTuple * d = call->tf()->domain();
@@ -2328,10 +2359,11 @@ bool ConnectionGraph::is_oop_field(Node* n, int offset, bool* unsafe) {
       if (field != nullptr) {
         bt = field->layout_type();
       } else {
-        // Check for unsafe oop field access
+        // Check for unsafe oop field access (StoreFastListSlot0: slot 0 of a java.util.FastArrayList)
         if (n->has_out_with(Op_StoreP, Op_LoadP, Op_StoreN, Op_LoadN) ||
             n->has_out_with(Op_GetAndSetP, Op_GetAndSetN, Op_CompareAndExchangeP, Op_CompareAndExchangeN) ||
             n->has_out_with(Op_CompareAndSwapP, Op_CompareAndSwapN, Op_WeakCompareAndSwapP, Op_WeakCompareAndSwapN) ||
+            n->has_out_with(Op_StoreFastListSlot0) ||
             BarrierSet::barrier_set()->barrier_set_c2()->escape_has_out_with_unsafe_object(n)) {
           bt = T_OBJECT;
           (*unsafe) = true;
@@ -3485,7 +3517,7 @@ void ConnectionGraph::split_unique_types(GrowableArray<Node *>  &alloc_worklist,
               op == Op_StrCompressedCopy || op == Op_StrInflatedCopy ||
               op == Op_StrEquals || op == Op_VectorizedHashCode ||
               op == Op_StrIndexOf || op == Op_StrIndexOfChar ||
-              op == Op_SubTypeCheck ||
+              op == Op_SubTypeCheck || op == Op_FastListForwardee ||
               BarrierSet::barrier_set()->barrier_set_c2()->is_gc_barrier_node(use))) {
           n->dump();
           use->dump();
@@ -3622,7 +3654,8 @@ void ConnectionGraph::split_unique_types(GrowableArray<Node *>  &alloc_worklist,
         } else if (!(BarrierSet::barrier_set()->barrier_set_c2()->is_gc_barrier_node(use) ||
               op == Op_AryEq || op == Op_StrComp || op == Op_CountPositives ||
               op == Op_StrCompressedCopy || op == Op_StrInflatedCopy || op == Op_VectorizedHashCode ||
-              op == Op_StrEquals || op == Op_StrIndexOf || op == Op_StrIndexOfChar)) {
+              op == Op_StrEquals || op == Op_StrIndexOf || op == Op_StrIndexOfChar ||
+              op == Op_FastListForwardee)) {
           n->dump();
           use->dump();
           assert(false, "EA: missing memory path");

@@ -49,6 +49,7 @@
 #include "memory/universe.hpp"
 #include "oops/access.inline.hpp"
 #include "oops/instanceKlass.hpp"
+#include "oops/instanceSwissTableBufferKlass.hpp"
 #include "oops/klass.inline.hpp"
 #include "oops/oop.inline.hpp"
 #include "oops/oopHandle.inline.hpp"
@@ -773,6 +774,12 @@ void JavaThread::exit(bool destroy_vm, ExitType exit_type) {
   Handle uncaught_exception(this, this->pending_exception());
   this->clear_pending_exception();
   Handle threadObj(this, this->threadObj());
+
+  if (!destroy_vm) {
+    // the moves of java.util.FastArrayLists this thread recorded: checked (repaired) now, as no
+    // thread could find them afterwards
+    InstanceSwissTableBufferKlass::check_fast_list_moves(this, true /* handshake */);
+  }
   assert(threadObj.not_null(), "Java thread object should be created");
 
   if (!destroy_vm) {
@@ -2158,7 +2165,7 @@ void JavaThread::pretouch_stack() {
 // Deferred OopHandle release support.
 
 class OopHandleList : public CHeapObj<mtInternal> {
-  static const int _count = 4;
+  static const int _count = 5;
   OopHandle _handles[_count];
   OopHandleList* _next;
   int _index;
@@ -2205,6 +2212,7 @@ void JavaThread::add_oop_handles_for_release() {
   new_head->add(_vthread);
   new_head->add(_jvmti_vthread);
   new_head->add(_scopedValueCache);
+  new_head->add(_fast_list_moves);
   _oop_handle_list = new_head;
   Service_lock->notify_all();
 }

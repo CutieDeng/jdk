@@ -94,6 +94,11 @@ class JavaThread: public Thread {
   OopHandle      _vthread; // the value returned by Thread.currentThread(): the virtual thread, if mounted, otherwise _threadObj
   OopHandle      _jvmti_vthread;
   OopHandle      _scopedValueCache;
+  // java.util.FastArrayList with slot 0 forwarding: the moves of lists this thread made since it last
+  // checked them, (list, storage) pairs of an Object[] (InstanceSwissTableBufferKlass::store_fast_list_forward)
+  OopHandle      _fast_list_moves;
+  int            _fast_list_moves_len = 0;       // pairs in _fast_list_moves
+  uint64_t       _fast_list_moves_counter = 0;   // the safepoint id at the last record
 
   static OopStorage* _thread_oop_storage;
 
@@ -519,6 +524,11 @@ private:
   void set_vthread(oop p);
   oop scopedValueCache() const;
   void set_scopedValueCache(oop p);
+  OopHandle& fast_list_moves()                      { return _fast_list_moves; }
+  int  fast_list_moves_len() const                  { return _fast_list_moves_len; }
+  void set_fast_list_moves_len(int n)               { _fast_list_moves_len = n; }
+  uint64_t fast_list_moves_counter() const          { return _fast_list_moves_counter; }
+  void set_fast_list_moves_counter(uint64_t c)      { _fast_list_moves_counter = c; }
   void clear_scopedValueBindings();
   oop jvmti_vthread() const;
   void set_jvmti_vthread(oop p);

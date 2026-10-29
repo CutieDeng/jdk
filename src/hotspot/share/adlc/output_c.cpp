@@ -3358,6 +3358,9 @@ void ArchDesc::defineClasses(FILE *fp) {
         fprintf(fp,"const MachOper* %sNode::memory_operand() const { return _opnds[%d]; }\n", instr->_ident, memory_operand);
   }
     }
+    if (instr->is_fast_list_forwardee()) {
+      fprintf(fp,"const TypePtr *%sNode::adr_type() const { return Compile::current()->fast_list_forward_adr_type(); }\n", instr->_ident);
+    }
   }
 
   // Get the length of the longest identifier

@@ -329,6 +329,8 @@ private:
   // Dtrace support
   static const TypeFunc* dtrace_method_entry_exit_Type();
   static const TypeFunc* dtrace_object_alloc_Type();
+  // java.util.FastArrayList.storeForward0(list, storage): two references, a boolean
+  static const TypeFunc* fast_list_store_forward_Type();
 
  private:
  static NamedCounter * volatile _named_counters;

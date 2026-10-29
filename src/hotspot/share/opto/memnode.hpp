@@ -750,6 +750,24 @@ public:
   virtual BasicType memory_type() const { return T_ADDRESS; }
 };
 
+//------------------------------StoreFastListSlot0Node--------------------------
+// The store of a reference into slot 0 of a java.util.FastArrayList with slot 0 forwarding, unless
+// slot 0 holds the tagged storage (InstanceSwissTableBufferKlass::fast_list_forward_tag): in the
+// machine code a load of slot 0, a test of the tag, and the store with the collector's barrier, in one
+// instruction, so that no safepoint poll comes between the test and the store (see
+// InstanceSwissTableBufferKlass::store_fast_list_forward). A StoreP otherwise, but for the folding of
+// stores and the capture into an initialization (StoreNode::Ideal), which take it for an unconditional
+// store; mismatched, so that StoreNode::Ideal of the stores of elements after it accepts it.
+class StoreFastListSlot0Node : public StorePNode {
+public:
+  StoreFastListSlot0Node(Node* c, Node* mem, Node* adr, const TypePtr* at, Node* val)
+    : StorePNode(c, mem, adr, at, val, MemNode::unordered) {
+    set_mismatched_access();
+  }
+  virtual int Opcode() const;
+  virtual Node* Ideal(PhaseGVN* phase, bool can_reshape);
+};
+
 //------------------------------StoreNNode-------------------------------------
 // Store narrow oop to memory
 class StoreNNode : public StoreNode {

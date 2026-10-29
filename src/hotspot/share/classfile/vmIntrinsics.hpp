@@ -664,6 +664,15 @@ class methodHandle;
    do_signature(fastArrayListCapWord_signature,                         "(Ljava/util/FastArrayList;)J")                          \
   do_intrinsic(_fastArrayListForwardFence, java_util_FastArrayList,     forwardFence0_name, void_method_signature, F_S)          \
    do_name(     forwardFence0_name,                                     "forwardFence0")                                         \
+  do_intrinsic(_fastArrayListForwardee,   java_util_FastArrayList,      forwardee0_name, fastArrayListForwardee_signature, F_S)  \
+   do_name(     forwardee0_name,                                        "forwardee0")                                            \
+   do_signature(fastArrayListForwardee_signature,                       "(Ljava/util/FastArrayList;)Ljava/util/FastArrayList;")  \
+  do_intrinsic(_fastArrayListStoreSlot0,  java_util_FastArrayList,      storeSlot0_name, fastArrayListStoreSlot0_signature, F_S)  \
+   do_name(     storeSlot0_name,                                        "storeSlot0")                                            \
+   do_signature(fastArrayListStoreSlot0_signature,                      "(Ljava/util/FastArrayList;Ljava/lang/Object;)Z")       \
+  do_intrinsic(_fastArrayListStoreForward, java_util_FastArrayList,     storeForward0_name, fastArrayListStoreForward_signature, F_SN) \
+   do_name(     storeForward0_name,                                     "storeForward0")                                         \
+   do_signature(fastArrayListStoreForward_signature,                    "(Ljava/util/FastArrayList;Ljava/util/FastArrayList;)Z") \
   do_intrinsic(_swissMatchTag,            java_util_SwissTable,         matchTagAt_name, swissMatchTag_signature, F_S)           \
    do_name(     matchTagAt_name,                                        "matchTagAt")                                            \
    do_signature(swissMatchTag_signature,                                "(Ljava/util/SwissTableBuffer;JI)J")                     \

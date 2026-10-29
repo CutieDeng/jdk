@@ -175,6 +175,8 @@ public:
   // See definition of MatchRule::skip_antidep_check
   bool skip_antidep_check() const;
   virtual Form::DataType is_ideal_store() const;// node matches ideal 'StoreXNode'
+  // node matches ideal 'FastListForwardee': a load without a memory operand (see FastListForwardeeNode)
+          bool        is_fast_list_forwardee() const;
           bool        is_ideal_mem() const { return is_ideal_load() != Form::none || is_ideal_store() != Form::none; }
   virtual uint        two_address(FormDict &globals); // output reg must match input reg
   // when chaining a constant to an instruction, return 'true' and set opType

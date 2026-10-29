@@ -1983,6 +1983,10 @@ void ArchDesc::declareClasses(FILE *fp) {
       }
       fprintf(fp,"  virtual const MachOper *memory_operand() const;\n");
     }
+    if (instr->is_fast_list_forwardee()) {
+      // no memory operand: the alias class is the slice of memory it reads
+      fprintf(fp,"  virtual const TypePtr *adr_type() const;\n");
+    }
 
     fprintf(fp, "#ifndef PRODUCT\n");
 

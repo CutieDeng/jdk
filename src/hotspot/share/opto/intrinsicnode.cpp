@@ -28,6 +28,9 @@
 #include "opto/mulnode.hpp"
 #include "opto/memnode.hpp"
 #include "opto/phaseX.hpp"
+#include "opto/compile.hpp"
+#include "ci/ciEnv.hpp"
+#include "ci/ciInstanceKlass.hpp"
 #include "utilities/population_count.hpp"
 #include "utilities/count_leading_zeros.hpp"
 #include "utilities/globalDefinitions.hpp"
@@ -367,4 +370,37 @@ const Type* ExpandBitsNode::Value(PhaseGVN* phase) const {
   }
 
   return bitshuffle_value(src_type, mask_type, Op_ExpandBits, bt);
+}
+
+//=============================================================================
+const TypePtr* FastListForwardeeNode::adr_type() const {
+  return Compile::current()->fast_list_forward_adr_type();
+}
+
+// A FastArrayList (its storage), or null
+const Type* FastListForwardeeNode::bottom_type() const {
+  ciInstanceKlass* ik = Compile::current()->env()->FastArrayList_klass();
+  return TypeOopPtr::make_from_klass(ik)->cast_to_ptr_type(TypePtr::BotPTR);
+}
+
+// Read the slice of its own out of a MergeMem, like a load
+Node* FastListForwardeeNode::Ideal(PhaseGVN* phase, bool can_reshape) {
+  if (can_reshape) {
+    Node* mem = in(MemNode::Memory);
+    if (mem->is_MergeMem()) {
+      Node* slice = mem->as_MergeMem()->memory_at(phase->C->get_alias_index(adr_type()));
+      if (slice != mem) {
+        set_req_X(MemNode::Memory, slice, phase);
+        return this;
+      }
+    }
+  }
+  return nullptr;
+}
+
+const Type* FastListForwardeeNode::Value(PhaseGVN* phase) const {
+  if (phase->type(in(MemNode::Memory)) == Type::TOP || phase->type(in(2)) == Type::TOP) {
+    return Type::TOP;
+  }
+  return bottom_type();
 }

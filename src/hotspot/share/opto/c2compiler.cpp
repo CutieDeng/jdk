@@ -690,6 +690,13 @@ bool C2Compiler::is_intrinsic_supported(const methodHandle& method) {
   case vmIntrinsics::_fastArrayListCopySlots:
   case vmIntrinsics::_fastArrayListCapWord:
   case vmIntrinsics::_fastArrayListForwardFence:
+  case vmIntrinsics::_fastArrayListStoreForward:
+    break;
+  case vmIntrinsics::_fastArrayListForwardee:
+    if (!Matcher::match_rule_supported(Op_FastListForwardee)) return false;
+    break;
+  case vmIntrinsics::_fastArrayListStoreSlot0:
+    if (!Matcher::match_rule_supported(Op_StoreFastListSlot0)) return false;
     break;
   case vmIntrinsics::_swissMatchTag:
     if (!Matcher::match_rule_supported(Op_SwissGroupMatch)) return false;

@@ -2652,6 +2652,14 @@ uint StoreNode::hash() const {
 // Change back-to-back Store(, p, x) -> Store(m, p, y) to Store(m, p, x).
 // When a store immediately follows a relevant allocation/initialization,
 // try to capture it into the initialization, or hoist it above.
+Node* StoreFastListSlot0Node::Ideal(PhaseGVN* phase, bool can_reshape) {
+  Node* p = MemNode::Ideal_common(phase, can_reshape);
+  if (p != nullptr) {
+    return (p == NodeSentinel) ? nullptr : p;
+  }
+  return nullptr;
+}
+
 Node *StoreNode::Ideal(PhaseGVN *phase, bool can_reshape) {
   Node* p = MemNode::Ideal_common(phase, can_reshape);
   if (p)  return (p == NodeSentinel) ? nullptr : p;

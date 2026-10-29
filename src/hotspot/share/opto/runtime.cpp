@@ -1977,6 +1977,18 @@ const TypeFunc *OptoRuntime::dtrace_object_alloc_Type() {
 }
 
 
+const TypeFunc* OptoRuntime::fast_list_store_forward_Type() {
+  const Type** fields = TypeTuple::fields(2);
+  fields[TypeFunc::Parms+0] = TypeInstPtr::NOTNULL;  // the list
+  fields[TypeFunc::Parms+1] = TypeInstPtr::NOTNULL;  // its storage
+  const TypeTuple* domain = TypeTuple::make(TypeFunc::Parms+2, fields);
+  fields = TypeTuple::fields(1);
+  fields[TypeFunc::Parms+0] = TypeInt::BOOL;         // whether the move was recorded and stored
+  const TypeTuple* range = TypeTuple::make(TypeFunc::Parms+1, fields);
+  return TypeFunc::make(domain, range);
+}
+
+
 JRT_ENTRY_NO_ASYNC(void, OptoRuntime::register_finalizer(oopDesc* obj, JavaThread* current))
   assert(oopDesc::is_oop(obj), "must be a valid oop");
   assert(obj->klass()->has_finalizer(), "shouldn't be here otherwise");

@@ -32,6 +32,7 @@
 #include "opto/addnode.hpp"
 #include "opto/callnode.hpp"
 #include "opto/idealGraphPrinter.hpp"
+#include "opto/intrinsicnode.hpp"
 #include "opto/matcher.hpp"
 #include "opto/memnode.hpp"
 #include "opto/movenode.hpp"
@@ -1893,6 +1894,8 @@ MachNode *Matcher::ReduceInst( State *s, int rule, Node *&mem ) {
     mach->set_barrier_data(leaf->as_LoadStore()->barrier_data());
   } else if (leaf->is_Mem()) {
     mach->set_barrier_data(leaf->as_Mem()->barrier_data());
+  } else if (leaf->Opcode() == Op_FastListForwardee) {
+    mach->set_barrier_data(static_cast<FastListForwardeeNode*>(leaf)->barrier_data());
   }
 
   return ex;
@@ -2277,6 +2280,7 @@ bool Matcher::find_shared_visit(MStack& mstack, Node* n, uint opcode, bool& mem_
     case Op_CompressM:
     case Op_ExpandV:
     case Op_VectorLoadMask:
+    case Op_FastListForwardee: // a root of its match tree, so that its memory input is kept
       set_shared(n); // Force result into register (it will be anyways)
       break;
     case Op_ConP: {  // Convert pointers above the centerline to NUL

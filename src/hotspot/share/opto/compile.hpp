@@ -1125,6 +1125,8 @@ class Compile : public Phase {
   // reach it, at offsets that are not constant (of varying sizes in a table), and no field overlaps it.
   bool is_swiss_table_buffer_data(const TypePtr* adr_type) const;
   int  swiss_table_buffer_data_base(ciInstanceKlass* ik) const;
+  // The alias class of FastListForwardeeNode (slot 0 of a FastArrayList that forwards).
+  const TypePtr* fast_list_forward_adr_type();
   // ik is java.util.SwissTableBuffer or java.util.FastArrayList.
   bool is_swiss_table_buffer_klass(ciInstanceKlass* ik) const;
 

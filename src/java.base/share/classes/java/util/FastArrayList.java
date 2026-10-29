@@ -112,8 +112,9 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * Whether slot 0 holds the storage of a list object that forwards, and fwd is slot 0 (with
      * generational ZGC, which has no compressed oops: 8 bytes less per list object). The storage is
      * tagged there: a reserved bit of the raw reference (FWD_TAG), which no element store sets and the
-     * collector keeps. Slot 0 is written only with a CAS from the element read (putSlot0), so that a
-     * racing write never replaces the storage, and by storeForward0.
+     * collector keeps. Slot 0 is written only where it does not hold the storage (putSlot0: a CAS, or
+     * C2's test and store in one instruction, which a racing move can overtake and the VM then
+     * repairs, repairForward0), and by storeForward0.
      */
     private static final boolean SLOT0;
     /** With SLOT0, the tag bit of slot 0's raw word; else 0. */
@@ -194,9 +195,24 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
 
     /**
      * SLOT0: stores n, tagged, into slot 0 of l, with the collector's barrier, in one store (the
-     * element there, if any, was copied).
+     * element there, if any, was copied), and records the move in this thread's moves in the VM, for
+     * the repair of a slot 0 that a racing store replaced (see putSlot0). C2 makes it a leaf call of
+     * the VM, without the transitions of a native call, which returns false, with nothing done, if the
+     * moves have no room: then storeForwardSlow0.
      */
-    private static native void storeForward0(FastArrayList<?> l, FastArrayList<?> n);
+    @IntrinsicCandidate
+    private static native boolean storeForward0(FastArrayList<?> l, FastArrayList<?> n);
+
+    /** storeForward0 with room made for the move (the native method, which may block). */
+    private static native boolean storeForwardSlow0(FastArrayList<?> l, FastArrayList<?> n);
+
+    /**
+     * SLOT0: the storage of l, a list that forwards (size FORWARDED) without the tag in slot 0: a racing
+     * store of element 0 replaced the storage there. After every racing store is over (a handshake with
+     * all threads), the VM puts back the storage of the last move of l that the elements have not left
+     * since, and returns it; null if there is none.
+     */
+    private static native FastArrayList<?> repairForward0(FastArrayList<?> l);
 
     private static native void registerNatives();
 
@@ -265,15 +281,27 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     }
 
     /**
-     * SLOT0: the store of e into slot 0, as a CAS from the value read, which fails if a racing move
-     * has put the storage there since (the tag makes the raw words differ): then the list has moved,
-     * and the change throws rather than replace the storage, which would lose every element.
+     * SLOT0: the store of e into slot 0, unless a racing move has put the storage there (tagged): then
+     * the list has moved, and the change throws rather than replace the storage, which would lose every
+     * element.
      */
     private void putSlot0(Object e) {
-        Object old = U.getReference(this, DATA_BASE);
-        if (!U.compareAndSetReference(this, DATA_BASE, old, e)) {
+        if (!storeSlot0(this, e)) {
             throw new ConcurrentModificationException();
         }
+    }
+
+    /**
+     * SLOT0: e into slot 0 of l unless it holds the tagged storage; whether it does not hold it. Here a
+     * CAS from the value read (it fails on the tag, which makes the raw words differ). C2 tests the tag
+     * and stores in one instruction, without a CAS (15 to 22 ns on Kunpeng 920), and tests the tag
+     * again after: a move that overtakes that store, between the test and the store, loses its storage
+     * to it, and is repaired (repairForward0).
+     */
+    @IntrinsicCandidate
+    private static boolean storeSlot0(FastArrayList<?> l, Object e) {
+        Object old = U.getReference(l, DATA_BASE);
+        return U.compareAndSetReference(l, DATA_BASE, old, e);
     }
 
     /**
@@ -381,7 +409,19 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     /** SLOT0: whether slot 0 of l holds the storage (its raw word has the tag). */
     @ForceInline
     private static boolean slot0Tagged(FastArrayList<?> l) {
-        return (U.getLong(l, DATA_BASE) & FWD_TAG) != 0;
+        return forwardee0(l) != null;
+    }
+
+    /**
+     * SLOT0: the storage of l if slot 0 holds it (its raw word has the tag), else null. C2 compiles it
+     * to one load of slot 0 (FastListForwardeeNode) on a memory slice of its own, which the stores of
+     * elements do not change for C2, so that it takes the test and the storage out of loops that
+     * change the list: the tag, and the storage while it is set, change only in storeForward0. Here,
+     * the raw word for the tag, then fwd (slot 0 again, a later value of it, which keeps the tag).
+     */
+    @IntrinsicCandidate
+    private static FastArrayList<?> forwardee0(FastArrayList<?> l) {
+        return (U.getLong(l, DATA_BASE) & FWD_TAG) != 0 ? l.fwd : null;
     }
 
     /** Of a value of capAndForward: whether the list forwards. */
@@ -404,10 +444,16 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * storage that the elements left since.
      */
     @ForceInline
+    @SuppressWarnings("unchecked")
     private FastArrayList<E> forwardee() {
-        // with SLOT0, fwd is slot 0: read only when tagged (it holds the storage then, for good: a CAS
-        // from an element fails on the tag, and the collector keeps the tag)
-        FastArrayList<E> t = !SLOT0 || slot0Tagged(this) ? fwd : null;
+        // with SLOT0, fwd is slot 0: the storage only when tagged (forwardee0; it holds the storage
+        // then: a store of an element does not replace it, but for C2's in a race, which the repair
+        // undoes, and the collector keeps the tag)
+        FastArrayList<E> t = SLOT0 ? (FastArrayList<E>) forwardee0(this) : fwd;
+        if (t == null && SLOT0 && size == FORWARDED) {
+            // a store of element 0 replaced the storage in slot 0 (it raced with the move)
+            t = (FastArrayList<E>) repairForward0(this);
+        }
         if (t == null) {
             // This list does not forward (any more): a young collection folded the list object that
             // forwarded into its storage, which this object is, after the caller had tested the
@@ -463,14 +509,15 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
             // The storage t that the elements leave keeps its element 0: a thread that still reads
             // t (a stale reader, an iterator) would read n there as an element, and no reader of t
             // follows it to n (its size, RETIRED, makes them throw).
+            if (!storeForward0(this, n)) {
+                storeForwardSlow0(this, n);
+            }
             if (t == this) {
-                storeForward0(this, n);
                 size = FORWARDED;
                 for (int i = 1; i < s; i++) {
                     put(i, null);
                 }
             } else {
-                storeForward0(this, n);
                 t.size = RETIRED;
             }
             forwardFence0();

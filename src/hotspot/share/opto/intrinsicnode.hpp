@@ -339,4 +339,39 @@ class IsFiniteDNode : public Node {
   virtual uint ideal_reg() const { return Op_RegI; }
 };
 
+//------------------------------FastListForwardee-------------------------------
+// The storage of a java.util.FastArrayList with slot 0 forwarding (generational ZGC,
+// InstanceSwissTableBufferKlass::fast_list_forward_tag), or null: one load of slot 0 of the list
+// (in(2)), whose value is the storage if it has the tag, through the collector's load barrier, and
+// null if not. One load for both, so that the reference is never one that was read without the tag.
+// Its memory (in(1)) is the state of a slice of its own, Compile::fast_list_forward_adr_type, where no
+// store goes: only calls and memory barriers change it. So the stores of elements, which have the
+// alias class of slot 0, neither order it nor make C2 load it again, and the operations of a list
+// that forwards keep its storage in a register. This is sound because the tag, and the storage while
+// it is set, change only in FastArrayList.storeForward0 (a call, between the MemBarCPUOrders of
+// forwardTo): every other write of slot 0 tests the tag first (a CAS from an element, or a
+// StoreFastListSlot0Node), and the collector keeps the tag and the reference when it heals the field
+// (only the colors change, which the barrier handles). A store that a racing move overtakes, between
+// its test and its store, replaces the storage until the VM puts it back
+// (InstanceSwissTableBufferKlass::repair_fast_list): a value of this node from before still names it. Not a LoadNode: the alias class of its memory differs from that of its
+// address, which the transformations of MemNodes rely on. Commoned by GVN like any node of the same
+// inputs. Without a control input, so that C2 takes it out of loops; it may then come ahead of the
+// test of its input for null (the forwardee of a forwardee, which is null without the tag): null for
+// a null list as well (the match rule tests it).
+class FastListForwardeeNode : public Node {
+  const uint8_t _barrier_data;   // the collector's barrier data for the load, as a LoadNode's
+ public:
+  FastListForwardeeNode(Node* mem, Node* list, uint8_t barrier_data)
+    : Node(nullptr, mem, list), _barrier_data(barrier_data) {}
+  virtual int Opcode() const;
+  virtual const TypePtr* adr_type() const;
+  virtual const Type* bottom_type() const;
+  virtual uint ideal_reg() const { return Op_RegP; }
+  virtual uint match_edge(uint idx) const { return idx == 2; }
+  virtual uint size_of() const { return sizeof(*this); }
+  virtual Node* Ideal(PhaseGVN* phase, bool can_reshape);
+  virtual const Type* Value(PhaseGVN* phase) const;
+  uint8_t barrier_data() const { return _barrier_data; }
+};
+
 #endif // SHARE_OPTO_INTRINSICNODE_HPP

@@ -46,6 +46,9 @@ public:
   // and the store of a tagged reference.
   static uintptr_t fast_list_forward_tag();
   static void store_tagged_oop_field(oop base, ptrdiff_t offset, oop value, uintptr_t tag);
+  // The same as a CAS from a value without the tag (raw word), which fails if another thread changed
+  // the field since (a move that stored another storage, say).
+  static bool cas_tagged_oop_field(oop base, ptrdiff_t offset, uintptr_t expected_raw, oop value, uintptr_t tag);
 
   virtual void on_thread_create(Thread* thread);
   virtual void on_thread_destroy(Thread* thread);

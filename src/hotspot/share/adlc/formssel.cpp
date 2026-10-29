@@ -434,6 +434,15 @@ Form::DataType InstructForm::is_ideal_load() const {
   return  _matrule->is_ideal_load();
 }
 
+// Return 'true' if this instruction matches an ideal 'FastListForwardee' node: the load of slot 0
+// of a java.util.FastArrayList that forwards, which has a memory input but no memory operand. It
+// reads memory like a load (anti-dependences, no rematerialization), its result is a reference
+// (bottom type), and its alias class is the slice of memory it reads (adr_type).
+bool InstructForm::is_fast_list_forwardee() const {
+  return _matrule != nullptr && _matrule->_rChild != nullptr &&
+         strcmp(_matrule->_rChild->_opType, "FastListForwardee") == 0;
+}
+
 // Return 'true' if this instruction matches an ideal 'LoadKlass' node
 bool InstructForm::skip_antidep_check() const {
   if( _matrule == nullptr ) return false;
@@ -566,7 +575,8 @@ bool InstructForm::rematerialize(FormDict &globals, RegisterForm *registers ) {
   // Check for an ideal 'Load?' and eliminate rematerialize option
   if ( is_ideal_load() != Form::none || // Ideal load?  Do not rematerialize
        is_ideal_copy() != Form::none || // Ideal copy?  Do not rematerialize
-       is_expensive()  != Form::none) { // Expensive?   Do not rematerialize
+       is_expensive()  != Form::none || // Expensive?   Do not rematerialize
+       is_fast_list_forwardee()) {      // Load?        Do not rematerialize
     rematerialize = false;
   }
 
@@ -616,6 +626,9 @@ bool InstructForm::needs_anti_dependence_check(FormDict &globals) const {
         strcmp(_matrule->_rChild->_opType,"AryEq"      )==0 ||
         strcmp(_matrule->_rChild->_opType,"VectorizedHashCode")==0 ))
     return true;
+
+  // The load of slot 0 of a java.util.FastArrayList that forwards uses a memory edge
+  if (is_fast_list_forwardee()) return true;
 
   // Check if instruction has a USE of a memory operand class, but no defs
   bool USE_of_memory  = false;
@@ -794,6 +807,7 @@ bool InstructForm::captures_bottom_type(FormDict &globals) const {
        !strcmp(_matrule->_rChild->_opType,"VectorMaskGen")||
        !strcmp(_matrule->_rChild->_opType,"CompareAndExchangeP") ||
        !strcmp(_matrule->_rChild->_opType,"CompareAndExchangeN"))) return true;
+  else if ( is_fast_list_forwardee() )                       return true;
   else if ( is_ideal_load() == Form::idealP )                return true;
   else if ( is_ideal_store() != Form::none  )                return true;
 
@@ -910,6 +924,10 @@ uint InstructForm::oper_input_base(FormDict &globals) {
         // and sun.nio.cs.iso8859_1$Encoder.EncodeISOArray
         // take 1 control and 1 memory edges.
         // Also String.(compressedCopy/inflatedCopy).
+    return 2;
+  }
+  if (is_fast_list_forwardee()) {
+    // the load of slot 0 of a java.util.FastArrayList that forwards: (no) control and memory
     return 2;
   }
 
@@ -3523,7 +3541,7 @@ int MatchNode::needs_ideal_memory_edge(FormDict &globals) const {
 #if INCLUDE_SHENANDOAHGC
     "ShenandoahCompareAndSwapN", "ShenandoahCompareAndSwapP", "ShenandoahWeakCompareAndSwapP", "ShenandoahWeakCompareAndSwapN", "ShenandoahCompareAndExchangeP", "ShenandoahCompareAndExchangeN",
 #endif
-    "StoreCM",
+    "StoreCM", "StoreFastListSlot0",
     "GetAndSetB", "GetAndSetS", "GetAndAddI", "GetAndSetI", "GetAndSetP",
     "GetAndAddB", "GetAndAddS", "GetAndAddL", "GetAndSetL", "GetAndSetN",
     "ClearArray"

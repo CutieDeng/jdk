@@ -44,6 +44,7 @@
 #include "opto/idealKit.hpp"
 #include "opto/library_call.hpp"
 #include "opto/mathexactnode.hpp"
+#include "opto/movenode.hpp"
 #include "opto/mulnode.hpp"
 #include "opto/narrowptrnode.hpp"
 #include "opto/opaquenode.hpp"
@@ -60,6 +61,9 @@
 #include "runtime/stubRoutines.hpp"
 #include "utilities/macros.hpp"
 #include "utilities/powerOfTwo.hpp"
+#if INCLUDE_ZGC
+#include "gc/z/c2/zBarrierSetC2.hpp"
+#endif
 
 //---------------------------make_vm_intrinsic----------------------------
 CallGenerator* Compile::make_vm_intrinsic(ciMethod* m, bool is_virtual) {
@@ -509,6 +513,9 @@ bool LibraryCallKit::try_to_inline(int predicate) {
   case vmIntrinsics::_fastArrayListCopySlots:         return inline_fast_list_copy_slots();
   case vmIntrinsics::_fastArrayListCapWord:           return inline_fast_list_cap_word();
   case vmIntrinsics::_fastArrayListForwardFence:      return inline_fast_list_forward_fence();
+  case vmIntrinsics::_fastArrayListForwardee:         return inline_fast_list_forwardee();
+  case vmIntrinsics::_fastArrayListStoreForward:      return inline_fast_list_store_forward();
+  case vmIntrinsics::_fastArrayListStoreSlot0:        return inline_fast_list_store_slot0();
   case vmIntrinsics::_swissMatchTag:            return inline_swiss_match_tag(false);
   case vmIntrinsics::_swissFirstTagLane:        return inline_swiss_match_tag(true);
   case vmIntrinsics::_copyMemory:               return inline_unsafe_copyMemory();
@@ -3025,6 +3032,88 @@ bool LibraryCallKit::inline_fast_list_cap_word() {
 // before those stores stay before them and those that come after stay after them. No instruction.
 bool LibraryCallKit::inline_fast_list_forward_fence() {
   insert_mem_bar(Op_MemBarCPUOrder);
+  return true;
+}
+
+//------------------------inline_fast_list_forwardee-----------------------------
+// java.util.FastArrayList.forwardee0(FastArrayList l), with slot 0 forwarding (generational ZGC): the
+// storage of l if slot 0 holds it (tagged), else null. A FastListForwardeeNode: one load of slot 0, on
+// a memory slice of its own (see there), with ZGC's strong load barrier for the storage. Not on a
+// platform without a match rule for the node: the Java code (a raw load for the tag, then fwd) then.
+bool LibraryCallKit::inline_fast_list_forwardee() {
+  ciInstanceKlass* ik = C->env()->FastArrayList_klass();
+  if (ik == nullptr || !ik->is_loaded() || !InstanceSwissTableBufferKlass::fast_list_slot0_forwarding() ||
+      !Matcher::match_rule_supported(Op_FastListForwardee)) {
+    return false;
+  }
+  Node* l = null_check(argument(0));
+  if (stopped()) {
+    return true;
+  }
+  uint8_t barrier_data = 0;
+#if INCLUDE_ZGC
+  barrier_data = ZBarrierStrong;
+#endif
+  Node* mem = memory(C->fast_list_forward_adr_type());
+  set_result(_gvn.transform(new FastListForwardeeNode(mem, l, barrier_data)));
+  return true;
+}
+
+//------------------------inline_fast_list_store_slot0---------------------------
+// java.util.FastArrayList.storeSlot0(FastArrayList l, Object e), with slot 0 forwarding: e into slot
+// 0 of l unless slot 0 holds the tagged storage (StoreFastListSlot0Node: test and store in one
+// instruction), then whether slot 0 holds no tagged storage: a load of its raw word after the store
+// (false if the store did not happen, or if a racing move stored the storage after it). In place of
+// the Java code's CAS from the element read, which costs 15 to 22 ns on Kunpeng 920; a move that
+// overtakes the store is repaired (InstanceSwissTableBufferKlass::store_fast_list_forward).
+bool LibraryCallKit::inline_fast_list_store_slot0() {
+  ciInstanceKlass* ik = C->env()->FastArrayList_klass();
+  if (ik == nullptr || !ik->is_loaded() || !InstanceSwissTableBufferKlass::fast_list_slot0_forwarding() ||
+      !Matcher::match_rule_supported(Op_StoreFastListSlot0)) {
+    return false;
+  }
+  Node* l = null_check(argument(0));
+  Node* e = argument(1);
+  if (stopped()) {
+    return true;
+  }
+  Node* adr = basic_plus_adr(l, InstanceSwissTableBufferKlass::fast_list_layout().data_base);
+  const TypePtr* adr_type = _gvn.type(adr)->isa_ptr();     // the alias class of the elements
+  StoreFastListSlot0Node* st = new StoreFastListSlot0Node(control(), memory(adr_type), adr, adr_type, e);
+#if INCLUDE_ZGC
+  st->set_barrier_data(ZBarrierStrong);
+#endif
+  Node* store = _gvn.transform(st);
+  set_memory(store, adr_type);
+  Node* word = make_load(control(), adr, TypeLong::LONG, T_LONG, adr_type, MemNode::unordered,
+                         LoadNode::Pinned, false /* require_atomic_access */, false /* unaligned */,
+                         true /* mismatched */);
+  Node* tag = _gvn.transform(new AndLNode(word, longcon(InstanceSwissTableBufferKlass::fast_list_forward_tag())));
+  Node* cmp = _gvn.transform(new CmpLNode(tag, longcon(0)));
+  Node* bol = _gvn.transform(new BoolNode(cmp, BoolTest::eq));
+  set_result(_gvn.transform(new CMoveINode(bol, intcon(0), intcon(1), TypeInt::BOOL)));
+  return true;
+}
+
+//------------------------inline_fast_list_store_forward-------------------------
+// java.util.FastArrayList.storeForward0(FastArrayList l, FastArrayList n), with slot 0 forwarding:
+// a leaf call of InstanceSwissTableBufferKlass::store_fast_list_forward_leaf (the record of the move
+// and the store of n, tagged, with the collector's barrier; false if the moves of the thread have no
+// room, which the Java code then makes with storeForwardSlow0) instead of the native method's
+// transitions. A call changes all of memory, the slice of FastListForwardeeNode included.
+bool LibraryCallKit::inline_fast_list_store_forward() {
+  if (!InstanceSwissTableBufferKlass::fast_list_slot0_forwarding()) {
+    return false;
+  }
+  Node* l = null_check(argument(0));
+  Node* n = null_check(argument(1));
+  if (stopped()) {
+    return true;
+  }
+  Node* call = make_runtime_call(RC_LEAF | RC_NO_FP, OptoRuntime::fast_list_store_forward_Type(),
+                                 CAST_FROM_FN_PTR(address, InstanceSwissTableBufferKlass::store_fast_list_forward_leaf),
+                                 "fast_list_store_forward", TypePtr::BOTTOM, l, n);
+  set_result(_gvn.transform(new ProjNode(call, TypeFunc::Parms)));
   return true;
 }
 

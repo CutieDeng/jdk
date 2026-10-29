@@ -1324,6 +1324,16 @@ int Compile::swiss_table_buffer_data_base(ciInstanceKlass* ik) const {
   return ik->layout_helper_size_in_bytes();
 }
 
+// The alias class of FastListForwardeeNode, the storage of a java.util.FastArrayList with slot 0
+// forwarding: FastArrayList at the byte after the start of its cap field, where no field starts, so
+// that no ordinary access has this class.
+const TypePtr* Compile::fast_list_forward_adr_type() {
+  ciInstanceKlass* ik = env()->FastArrayList_klass();
+  assert(ik != nullptr && ik->is_loaded(), "only for FastArrayList");
+  const int offset = InstanceSwissTableBufferKlass::fast_list_layout().capacity_offset + 1;
+  return alias_type(TypeInstPtr::make(TypePtr::BotPTR, ik, true, nullptr, offset))->adr_type();
+}
+
 const TypePtr *Compile::flatten_alias_type( const TypePtr *tj ) const {
   assert(do_aliasing(), "Aliasing should be enabled");
   int offset = tj->offset();
@@ -3294,6 +3304,7 @@ void Compile::final_graph_reshaping_main_switch(Node* n, Final_Reshape_Counts& f
   case Op_GetAndSetP:
   case Op_GetAndSetN:
   case Op_StoreP:
+  case Op_StoreFastListSlot0:
   case Op_StoreN:
   case Op_StoreNKlass:
   case Op_LoadB:

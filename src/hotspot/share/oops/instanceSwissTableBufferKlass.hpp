@@ -147,8 +147,33 @@ public:
   static jlong fast_list_forward_tag() { return _fast_list_forward_tag; }
   static bool fast_list_slot0_forwarding() { return _fast_list_forward_tag != 0; }
   // Slot 0 forwarding: stores storage, tagged, into slot 0 of list, with the collector's barrier, in
-  // one store (FastArrayList.storeForward0).
-  static void store_fast_list_forward(oop list, oop storage);
+  // one store, and records the move in thread's moves (FastArrayList.storeForward0); false, with
+  // nothing done, if the moves have no room (make_room_for_fast_list_moves).
+  //
+  // The moves are for the repair of a slot 0 that a racing write replaced. FastArrayList writes slot
+  // 0 of a list that other threads may see only if it is not tagged: with a CAS from the element read
+  // (interpreter, C1), or (C2) with a store that tests the tag and stores in one instruction
+  // (StoreFastListSlot0), which a move can still overtake: the store then replaces the storage, and the
+  // list forwards without it. Such a write is under way only until its thread reaches a safepoint
+  // poll: after a handshake with every thread, or a whole safepoint, every write that raced with a
+  // move is over, and the moves recorded before can be checked (check_fast_list_moves) and dropped.
+  // A thread that finds a list that forwards without its storage repairs it from the moves of every
+  // thread (repair_fast_list).
+  static bool store_fast_list_forward(JavaThread* thread, oop list, oop storage);
+  // The same as a leaf call from compiled code (C2's intrinsic of FastArrayList.storeForward0).
+  static jboolean store_fast_list_forward_leaf(oopDesc* list, oopDesc* storage);
+  // Room for one move in the moves of thread: allocates them, or checks and drops the recorded ones
+  // (after a handshake if no whole safepoint has passed since the last record).
+  static void make_room_for_fast_list_moves(JavaThread* thread, TRAPS);
+  // Repairs the lists of the moves of thread that a racing write left without their storage, and
+  // drops the moves; handshake: first a handshake with every thread (else the caller knows that every
+  // write that raced with them is over).
+  static void check_fast_list_moves(JavaThread* thread, bool handshake);
+  // A list that forwards without its storage in slot 0 (FastArrayList.repairForward0): after a
+  // handshake with every thread, the storage of the most recent move of list in the moves of all
+  // threads that the elements have not left, back in slot 0. The storage of list, or null.
+  static oop repair_fast_list(Handle list);
+  static const int fast_list_moves_capacity = 1024;   // moves per thread before a check
   static const Klass* fast_list_klass() { return _fast_list_klass; }
   // Sizes of a FastArrayList that does not hold its elements (FastArrayList.FORWARDED, RETIRED): the
   // list object that forwards to its storage (fwd), which a young collection may fold into the

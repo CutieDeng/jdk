@@ -28,12 +28,21 @@
 #include "gc/shared/collectedHeap.hpp"
 #include "gc/shared/memAllocator.hpp"
 #include "jni.h"
+#include "logging/log.hpp"
+#include "memory/oopFactory.hpp"
 #include "oops/instanceSwissTableBufferKlass.inline.hpp"
+#include "oops/objArrayOop.inline.hpp"
 #include "oops/oop.inline.hpp"
+#include "oops/oopHandle.inline.hpp"
 #include "runtime/fieldDescriptor.inline.hpp"
 #include "runtime/handles.inline.hpp"
+#include "runtime/handshake.hpp"
 #include "runtime/interfaceSupport.inline.hpp"
+#include "runtime/javaThread.inline.hpp"
 #include "runtime/jniHandles.inline.hpp"
+#include "runtime/safepoint.hpp"
+#include "runtime/safepointVerifiers.hpp"
+#include "runtime/threadSMR.inline.hpp"
 #include "utilities/ostream.hpp"
 #include "utilities/powerOfTwo.hpp"
 #if INCLUDE_ZGC
@@ -109,15 +118,149 @@ void InstanceSwissTableBufferKlass::init_offsets() {
   _fast_list_klass = f;
 }
 
-void InstanceSwissTableBufferKlass::store_fast_list_forward(oop list, oop storage) {
-  assert(list->klass() == _fast_list_klass && storage->klass() == _fast_list_klass, "FastArrayList");
+JRT_LEAF(jboolean, InstanceSwissTableBufferKlass::store_fast_list_forward_leaf(oopDesc* list, oopDesc* storage))
+  return store_fast_list_forward(JavaThread::current(), cast_to_oop(list), cast_to_oop(storage));
+JRT_END
+
+static void store_tagged(oop list, oop storage) {
 #if INCLUDE_ZGC
-  if (fast_list_slot0_forwarding()) {
-    ZBarrierSet::store_tagged_oop_field(list, _fast_list.data_base, storage, _fast_list_forward_tag);
+  if (InstanceSwissTableBufferKlass::fast_list_slot0_forwarding()) {
+    ZBarrierSet::store_tagged_oop_field(list, InstanceSwissTableBufferKlass::fast_list_layout().data_base, storage,
+                                        InstanceSwissTableBufferKlass::fast_list_forward_tag());
     return;
   }
 #endif
   ShouldNotReachHere();
+}
+
+// Whether slot 0 of list holds the storage: the tag in its raw word.
+static bool slot0_tagged(oop list) {
+  const uintptr_t raw = Atomic::load(list->field_addr<uintptr_t>(InstanceSwissTableBufferKlass::fast_list_layout().data_base));
+  return (raw & (uintptr_t)InstanceSwissTableBufferKlass::fast_list_forward_tag()) != 0;
+}
+
+static jint size_of(oop list) {
+  return list->int_field_acquire(InstanceSwissTableBufferKlass::fast_list_size_offset());
+}
+
+bool InstanceSwissTableBufferKlass::store_fast_list_forward(JavaThread* thread, oop list, oop storage) {
+  assert(list->klass() == _fast_list_klass && storage->klass() == _fast_list_klass, "FastArrayList");
+  // No safepoint from here to the tagged store: the record is there before any thread can see the tag.
+  NoSafepointVerifier nsv;
+  objArrayOop moves = objArrayOop(thread->fast_list_moves().resolve());
+  const int n = thread->fast_list_moves_len();
+  if (moves == nullptr || 2 * (n + 1) > moves->length()) {
+    return false;
+  }
+  moves->obj_at_put(2 * n, list);
+  moves->obj_at_put(2 * n + 1, storage);
+  thread->set_fast_list_moves_len(n + 1);
+  thread->set_fast_list_moves_counter(SafepointSynchronize::safepoint_id());
+  store_tagged(list, storage);
+  return true;
+}
+
+// Every thread reaches a safepoint poll (or is not running Java code), so that every write of slot 0
+// that raced with a move is over.
+class FastListMovesHandshake : public HandshakeClosure {
+ public:
+  FastListMovesHandshake() : HandshakeClosure("FastArrayListMoves") {}
+  void do_thread(Thread* thread) {}
+};
+
+// A storage that slot 0 of list lost to a racing write, back, unless the list does not forward any
+// more (a racing change), or the elements left this storage since (a later move has the right one).
+// A CAS from the untagged word read, so that a racing move that stores its storage meanwhile wins.
+static void repair_if_replaced(oop list, oop storage) {
+  if (list == nullptr || storage == nullptr) {
+    return;
+  }
+  const int data_base = InstanceSwissTableBufferKlass::fast_list_layout().data_base;
+  const uintptr_t tag = (uintptr_t)InstanceSwissTableBufferKlass::fast_list_forward_tag();
+  for (int attempt = 0; attempt < 4; attempt++) {     // the collector may recolor the word meanwhile
+    const uintptr_t raw = Atomic::load(list->field_addr<uintptr_t>(data_base));
+    if ((raw & tag) != 0 || size_of(list) != InstanceSwissTableBufferKlass::fast_list_forwarded) {
+      return;                                          // (the list's own words first: usually all)
+    }
+    if (size_of(storage) < 0) {
+      return;
+    }
+#if INCLUDE_ZGC
+    if (ZBarrierSet::cas_tagged_oop_field(list, data_base, raw, storage, tag)) {
+      log_debug(gc)("FastArrayList " PTR_FORMAT ": storage " PTR_FORMAT " back in slot 0", p2i(list), p2i(storage));
+      return;
+    }
+#else
+    return;
+#endif
+  }
+}
+
+void InstanceSwissTableBufferKlass::check_fast_list_moves(JavaThread* thread, bool handshake) {
+  if (thread->fast_list_moves_len() == 0) {
+    return;
+  }
+  if (handshake) {
+    FastListMovesHandshake hs;
+    Handshake::execute(&hs);
+  }
+  objArrayOop moves = objArrayOop(thread->fast_list_moves().resolve());
+  const int n = thread->fast_list_moves_len();
+  for (int i = 0; i < n; i++) {
+    repair_if_replaced(moves->obj_at(2 * i), moves->obj_at(2 * i + 1));
+  }
+  // The records stay until overwritten or the array is replaced (make_room_for_fast_list_moves).
+  thread->set_fast_list_moves_len(0);
+}
+
+void InstanceSwissTableBufferKlass::make_room_for_fast_list_moves(JavaThread* thread, TRAPS) {
+  if (!thread->fast_list_moves().is_empty()) {
+    // A safepoint whose threads all stopped after the last record (the id grows once they have)
+    // ends every racing write.
+    const bool safepoint_since = SafepointSynchronize::safepoint_id() > thread->fast_list_moves_counter();
+    check_fast_list_moves(thread, !safepoint_since);
+  }
+  // A new array for the next records: a young object, whose elements the stores of the records reach
+  // through the fast path of the collector's store barrier (an old array, reused, would take the slow
+  // path for every element after each phase of the collector), and which lets the lists of the old
+  // records go.
+  objArrayOop moves = oopFactory::new_objArray(vmClasses::Object_klass(), 2 * fast_list_moves_capacity, CHECK);
+  if (thread->fast_list_moves().is_empty()) {
+    thread->fast_list_moves() = OopHandle(JavaThread::thread_oop_storage(), moves);
+  } else {
+    thread->fast_list_moves().replace(moves);
+  }
+  thread->set_fast_list_moves_len(0);
+}
+
+oop InstanceSwissTableBufferKlass::repair_fast_list(Handle list) {
+  FastListMovesHandshake hs;
+  Handshake::execute(&hs);
+  oop found = nullptr;
+  {
+    // Moves that other threads record or drop meanwhile: a move missed here leaves the list throwing
+    ThreadsListHandle tlh;
+    for (JavaThread* jt : tlh) {
+      objArrayOop moves = objArrayOop(jt->fast_list_moves().resolve());
+      if (moves == nullptr) {
+        continue;
+      }
+      const int n = MIN2(jt->fast_list_moves_len(), moves->length() / 2);
+      for (int i = n - 1; i >= 0 && found == nullptr; i--) {
+        if (moves->obj_at(2 * i) == list()) {
+          oop s = moves->obj_at(2 * i + 1);
+          if (s != nullptr && size_of(s) >= 0) {
+            found = s;
+          }
+        }
+      }
+      if (found != nullptr) {
+        break;
+      }
+    }
+  }
+  repair_if_replaced(list(), found);
+  return slot0_tagged(list()) ? oop(HeapAccess<>::oop_load_at(list(), _fast_list.data_base)) : oop(nullptr);
 }
 
 jint InstanceSwissTableBufferKlass::max_capacity() const {
@@ -247,9 +390,20 @@ JVM_ENTRY(jlong, FastArrayList_forwardTag(JNIEnv* env, jclass cls)) {
   return InstanceSwissTableBufferKlass::fast_list_forward_tag();
 } JVM_END
 
-JVM_ENTRY(void, FastArrayList_storeForward0(JNIEnv* env, jclass cls, jobject list, jobject storage)) {
-  InstanceSwissTableBufferKlass::store_fast_list_forward(JNIHandles::resolve_non_null(list),
-                                                         JNIHandles::resolve_non_null(storage));
+JVM_ENTRY(jboolean, FastArrayList_storeForward0(JNIEnv* env, jclass cls, jobject list, jobject storage)) {
+  Handle l(THREAD, JNIHandles::resolve_non_null(list));
+  Handle s(THREAD, JNIHandles::resolve_non_null(storage));
+  if (!InstanceSwissTableBufferKlass::store_fast_list_forward(thread, l(), s())) {
+    InstanceSwissTableBufferKlass::make_room_for_fast_list_moves(thread, CHECK_false);
+    const bool stored = InstanceSwissTableBufferKlass::store_fast_list_forward(thread, l(), s());
+    guarantee(stored, "room for a FastArrayList move");
+  }
+  return true;
+} JVM_END
+
+JVM_ENTRY(jobject, FastArrayList_repairForward0(JNIEnv* env, jclass cls, jobject list)) {
+  Handle l(THREAD, JNIHandles::resolve_non_null(list));
+  return JNIHandles::make_local(THREAD, InstanceSwissTableBufferKlass::repair_fast_list(l));
 } JVM_END
 
 #define CC (char*)
@@ -260,7 +414,9 @@ static JNINativeMethod java_util_FastArrayList_methods[] = {
   {CC "dataBase",    CC "()I",                          FN_PTR(FastArrayList_dataBase)},
   {CC "maxCapacity", CC "()I",                          FN_PTR(FastArrayList_maxCapacity)},
   {CC "forwardTag",  CC "()J",                          FN_PTR(FastArrayList_forwardTag)},
-  {CC "storeForward0", CC "(Ljava/util/FastArrayList;Ljava/util/FastArrayList;)V", FN_PTR(FastArrayList_storeForward0)},
+  {CC "storeForward0", CC "(Ljava/util/FastArrayList;Ljava/util/FastArrayList;)Z", FN_PTR(FastArrayList_storeForward0)},
+  {CC "storeForwardSlow0", CC "(Ljava/util/FastArrayList;Ljava/util/FastArrayList;)Z", FN_PTR(FastArrayList_storeForward0)},
+  {CC "repairForward0", CC "(Ljava/util/FastArrayList;)Ljava/util/FastArrayList;", FN_PTR(FastArrayList_repairForward0)},
 };
 
 #undef CC

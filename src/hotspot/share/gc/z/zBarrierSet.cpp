@@ -182,6 +182,14 @@ void ZBarrierSet::store_tagged_oop_field(oop base, ptrdiff_t offset, oop value, 
   Atomic::release_store(p, to_zpointer(untype(ZAddress::store_good(to_zaddress(value))) | tag));
 }
 
+bool ZBarrierSet::cas_tagged_oop_field(oop base, ptrdiff_t offset, uintptr_t expected_raw, oop value, uintptr_t tag) {
+  assert(tag != 0 && (tag & ~ZPointerReservedMask) == 0 && (expected_raw & tag) == 0, "a reserved bit");
+  volatile zpointer* const p = (volatile zpointer*)base->field_addr<zpointer>((int)offset);
+  ZBarrier::store_barrier_on_heap_oop_field(p, false /* heal */);
+  const zpointer tagged = to_zpointer(untype(ZAddress::store_good(to_zaddress(value))) | tag);
+  return Atomic::cmpxchg(p, zpointer(expected_raw), tagged) == zpointer(expected_raw);
+}
+
 void ZBarrierSet::print_on(outputStream* st) const {
   st->print_cr("ZBarrierSet");
 }

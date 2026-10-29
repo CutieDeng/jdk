@@ -32,6 +32,7 @@ source_hpp %{
 source %{
 
 #include "gc/z/zBarrierSetAssembler.hpp"
+#include "oops/instanceSwissTableBufferKlass.hpp"
 
 static void z_color(MacroAssembler& _masm, const MachNode* node, Register dst, Register src) {
   assert_different_registers(src, dst);
@@ -117,6 +118,69 @@ instruct zLoadP(iRegPNoSp dst, memory8 mem, rFlagsReg cr)
   %}
 
   ins_pipe(iload_reg_mem);
+%}
+
+// The storage of a java.util.FastArrayList with slot 0 forwarding (FastListForwardeeNode): one load of
+// slot 0; null without the tag (InstanceSwissTableBufferKlass::fast_list_forward_tag, a reserved
+// bit), else the reference through the strong load barrier, whose shift drops the tag with the
+// colors (its slow path heals the field and keeps the tag, ZBarrier::self_heal). The load and the
+// barrier work in tmp, a register of its own, since the slow path needs the address in list; dst is
+// written last, so that it may be list's register. (TEMP dst would make the instruction
+// two-address, which the node, whose memory input precedes its operands, does not support.) Null for a
+// null list too: the node has no control input, so that C2 may compute it ahead of the test of its
+// input (as for the forwardee of a forwardee that is null), and it takes it out of loops.
+instruct zFastListForwardee(iRegPNoSp dst, iRegP list, iRegPNoSp tmp, rFlagsReg cr)
+%{
+  match(Set dst (FastListForwardee list));
+  predicate(UseZGC && ZGenerational);
+  effect(TEMP tmp, KILL cr);
+
+  ins_cost(6 * INSN_COST);
+
+  format %{ "ldr  $tmp, [$list, #data_base]\t# FastArrayList forwardee, null without the tag\n\t"
+            "mov  $dst, $tmp" %}
+
+  ins_encode %{
+    const Address ref_addr = Address($list$$Register, InstanceSwissTableBufferKlass::fast_list_layout().data_base);
+    Label untagged, done;
+    __ cbz($list$$Register, untagged);
+    __ ldr($tmp$$Register, ref_addr);
+    __ tbz($tmp$$Register, exact_log2(InstanceSwissTableBufferKlass::fast_list_forward_tag()), untagged);
+    z_load_barrier(_masm, this, ref_addr, $tmp$$Register, rscratch1);
+    __ mov($dst$$Register, $tmp$$Register);
+    __ b(done);
+    __ bind(untagged);
+    __ mov($dst$$Register, zr);
+    __ bind(done);
+  %}
+
+  ins_pipe(pipe_class_memory);
+%}
+
+// A store of a reference into slot 0 of a java.util.FastArrayList with slot 0 forwarding
+// (StoreFastListSlot0Node): nothing if slot 0 holds the tagged storage; the test and the store in one
+// instruction, without a safepoint poll between them (InstanceSwissTableBufferKlass::store_fast_list_forward).
+instruct zStoreFastListSlot0(memory mem, iRegP src, iRegPNoSp tmp, rFlagsReg cr)
+%{
+  predicate(UseZGC && ZGenerational && n->as_Store()->barrier_data() != 0);
+  match(Set mem (StoreFastListSlot0 mem src));
+  effect(TEMP tmp, KILL cr);
+
+  ins_cost(8 * INSN_COST);
+
+  format %{ "str  $mem, $src\t# FastArrayList slot 0, unless it holds the tagged storage" %}
+
+  ins_encode %{
+    const Address ref_addr = mem2address($mem->opcode(), as_Register($mem$$base), $mem$$index, $mem$$scale, $mem$$disp);
+    Label tagged;
+    __ ldr($tmp$$Register, ref_addr);
+    __ tbnz($tmp$$Register, exact_log2(InstanceSwissTableBufferKlass::fast_list_forward_tag()), tagged);
+    z_store_barrier(_masm, this, ref_addr, $src$$Register, $tmp$$Register, rscratch2, false /* is_atomic */);
+    __ str($tmp$$Register, ref_addr);
+    __ bind(tagged);
+  %}
+
+  ins_pipe(pipe_serial);
 %}
 
 // Load Pointer Volatile
