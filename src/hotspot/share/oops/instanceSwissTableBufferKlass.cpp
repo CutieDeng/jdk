@@ -179,7 +179,9 @@ static void repair_if_replaced(oop list, oop storage) {
   const uintptr_t tag = (uintptr_t)InstanceSwissTableBufferKlass::fast_list_forward_tag();
   for (int attempt = 0; attempt < 4; attempt++) {     // the collector may recolor the word meanwhile
     const uintptr_t raw = Atomic::load(list->field_addr<uintptr_t>(data_base));
-    if ((raw & tag) != 0 || size_of(list) != InstanceSwissTableBufferKlass::fast_list_forwarded) {
+    const jint list_size = size_of(list);
+    if ((raw & tag) != 0 || (list_size != InstanceSwissTableBufferKlass::fast_list_forwarded &&
+                             list_size != InstanceSwissTableBufferKlass::fast_list_forwarding)) {
       return;                                          // (the list's own words first: usually all)
     }
     if (size_of(storage) < 0) {

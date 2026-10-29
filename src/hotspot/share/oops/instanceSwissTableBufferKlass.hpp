@@ -185,6 +185,11 @@ public:
   // (FastArrayListFolding): from phase 1, which decides it, to phase 2, which gives the object no
   // space. The object is unreachable after the collection.
   static const jint fast_list_folding   = -3;
+  // The size of a list object while FastArrayList.forwardTo clears its slots (FORWARDING), after
+  // its fwd holds the storage; then fast_list_forwarded. Never folded: a fold at a safepoint in
+  // forwardTo would replace the list by the storage in its frame, and the remaining stores of null
+  // would clear elements of the storage.
+  static const jint fast_list_forwarding = -4;
 
   // Byte offset of the control bytes of a SwissTableBuffer: the instance size of the class.
   int ctrl_base_in_bytes() const { return size_helper() << LogHeapWordSize; }

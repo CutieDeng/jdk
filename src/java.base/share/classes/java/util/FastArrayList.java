@@ -87,6 +87,14 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      * (InstanceSwissTableBufferKlass::fast_list_retired).
      */
     private static final int RETIRED = -2;
+    /**
+     * The size of a list while forwardTo clears its slots, after fwd holds the storage: then
+     * FORWARDED. A collection folds only a list that is FORWARDED: one that it would fold while the
+     * slots are cleared would replace this list by the storage in the frame of forwardTo, whose
+     * remaining stores of null would then clear elements of the storage
+     * (InstanceSwissTableBufferKlass::fast_list_forwarding).
+     */
+    private static final int FORWARDING = -4;
 
     /** Byte offset of element 0. */
     private static final long DATA_BASE;
@@ -143,7 +151,7 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
      *          storage of this list, whose size is the number of elements. When the elements move
      *          again, the storage they leave forwards to the new one as well (RETIRED, so that its
      *          iterators fail; with SLOT0 it is only RETIRED), and this list to the new one
-     *          directly. A collection may fold a list
+     *          directly (FORWARDING while forwardTo clears its slots). A collection may fold a list
      *          that forwards: every reference to it then refers to (the copy of) its storage, which
      *          is the list from then on (FastArrayListFolding in the VM).
      *   cap    the capacity, written by the VM at allocation and never changed. Read with fwd as one
@@ -451,7 +459,8 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         // then: a store of an element does not replace it, but for C2's in a race, which the repair
         // undoes, and the collector keeps the tag)
         FastArrayList<E> t = SLOT0 ? (FastArrayList<E>) forwardee0(this) : fwd;
-        if (t == null && SLOT0 && size == FORWARDED) {
+        int s;
+        if (t == null && SLOT0 && ((s = size) == FORWARDED || s == FORWARDING)) {
             // a store of element 0 replaced the storage in slot 0 (it raced with the move)
             t = (FastArrayList<E>) repairForward0(this);
         }
@@ -514,10 +523,11 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
                 storeForwardSlow0(this, n);
             }
             if (t == this) {
-                size = FORWARDED;
+                size = FORWARDING;
                 for (int i = 1; i < s; i++) {
                     put(i, null);
                 }
+                size = FORWARDED;
             } else {
                 t.size = RETIRED;
             }
@@ -526,10 +536,11 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
         }
         if (t == this) {
             U.putReference(this, FWD, n);
-            size = FORWARDED;
+            size = FORWARDING;
             for (int i = 0; i < s; i++) {
                 put(i, null);
             }
+            size = FORWARDED;
         } else {
             U.putReference(this, FWD, n);
             U.putReference(t, FWD, n);
