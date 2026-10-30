@@ -72,10 +72,12 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     private static final long serialVersionUID = -2393474218547326715L;
 
     private static final Unsafe U = Unsafe.getUnsafe();
+    /** The capacity of a list that grows from a smaller one, at least (the first growth). */
+    private static final int SMALL_CAPACITY = 4;
+    /** The capacity of a list that grows from SMALL_CAPACITY or more, at least (ArrayList's first). */
+    private static final int DEFAULT_CAPACITY = 10;
     /** log2 of the size of a heap reference. */
     private static final int REF_SHIFT = Unsafe.ARRAY_OBJECT_INDEX_SCALE == 4 ? 2 : 3;
-    /** The capacity of a larger list that replaces a list of smaller capacity, at least. */
-    private static final int DEFAULT_CAPACITY = 10;
     /**
      * The size of a list that forwards to another list object, its storage (fwd); a young collection
      * may fold it into the storage (InstanceSwissTableBufferKlass::fast_list_forwarded).
@@ -550,14 +552,18 @@ public final class FastArrayList<E> implements List<E>, RandomAccess, Serializab
     }
 
     /**
-     * A capacity of at least minCapacity, grown from cap like java.util.ArrayList grows its array: by
-     * half, and to at least DEFAULT_CAPACITY from a smaller capacity (as ArrayList's first growth).
+     * A capacity of at least minCapacity (larger than cap), grown from cap: to 4 from a smaller one, to
+     * 10 from a smaller one, then by half as java.util.ArrayList grows its array (1, 4, 10, 15, 22, 33,
+     * ... from 1). Small lists get a small storage (most hold a few elements), in few growths: a growth
+     * moves the elements to a new list object and forwards to it, which costs more than ArrayList's
+     * copy of an array (growth as ArrayList's from 1, by one up to 4, made a list of 4 elements twice
+     * as slow to fill as an ArrayList made without a capacity).
      */
     @ForceInline
     private static int grownCapacity(int cap, int minCapacity) {
-        int old = cap;
-        int c = old < DEFAULT_CAPACITY ? Math.max(DEFAULT_CAPACITY, minCapacity)
-                                       : ArraysSupport.newLength(old, minCapacity - old, old >> 1);
+        int c = cap < SMALL_CAPACITY ? Math.max(SMALL_CAPACITY, minCapacity)
+              : cap < DEFAULT_CAPACITY ? Math.max(DEFAULT_CAPACITY, minCapacity)
+              : ArraysSupport.newLength(cap, minCapacity - cap, cap >> 1);
         if (c > MAX_CAPACITY) {
             if (minCapacity > MAX_CAPACITY) {
                 throw new OutOfMemoryError("Required FastArrayList capacity " + minCapacity + " is too large");
