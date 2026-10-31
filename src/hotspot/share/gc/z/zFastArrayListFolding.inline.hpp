@@ -45,13 +45,18 @@
 class ZFastArrayListFolding : AllStatic {
 public:
   // Whether the object at addr is a FastArrayList that forwards (FORWARDED, not FORWARDING, whose
-  // slots forwardTo still clears) and folding is on
+  // slots forwardTo still clears) and folding is on. Inlined where every relocated object takes it:
+  // a compare of the narrow klass in its header with fast_list_fold_nklass, which is 0 without
+  // folding or without compressed class pointers (no list folds then; the word at the klass offset
+  // is then half a Klass*, which may be 0, hence the test of the key first).
   static bool is_forwarding_list(zaddress addr) {
-    const Klass* const list_klass = InstanceSwissTableBufferKlass::fast_list_klass();
-    const oop obj = to_oop(addr);
-    return FastListFolding && list_klass != nullptr && obj->klass() == list_klass &&
-           Atomic::load(obj->field_addr<jint>(InstanceSwissTableBufferKlass::fast_list_size_offset())) ==
-               InstanceSwissTableBufferKlass::fast_list_forwarded;
+    const juint key = InstanceSwissTableBufferKlass::fast_list_fold_nklass();
+    const address a = (address)untype(addr);
+    if (key == 0 || *(juint*)(a + oopDesc::klass_offset_in_bytes()) != key) {
+      return false;
+    }
+    return Atomic::load((jint*)(a + InstanceSwissTableBufferKlass::fast_list_size_offset())) ==
+           InstanceSwissTableBufferKlass::fast_list_forwarded;
   }
 
   // The colored reference to the storage of a list that forwards, as it is in the list (fwd, or slot

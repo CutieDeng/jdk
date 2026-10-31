@@ -454,10 +454,10 @@ static bool fast_list_take_identity(markWord m, oop target) {
 //     list: the store barrier buffers remap a field of the list to the same offset in the storage;
 //   - the list is young or the storage old: references from old objects to an old list are not in
 //     the remembered set, which a young storage would need.
-static ZForwardingEntry fast_list_fold(ZForwarding* forwarding, zaddress from_addr, ZForwardingCursor* cursor) {
-  if (!ZFastArrayListFolding::is_forwarding_list(from_addr)) {
-    return ZForwardingEntry();
-  }
+// Out of line, for the objects that ZFastArrayListFolding::is_forwarding_list, which every relocated
+// object takes inline, finds: other objects take no call.
+static NOINLINE ZForwardingEntry fast_list_fold(ZForwarding* forwarding, zaddress from_addr, ZForwardingCursor* cursor) {
+  assert(ZFastArrayListFolding::is_forwarding_list(from_addr), "a list that forwards");
 
   const oop list = to_oop(from_addr);
   const markWord m = list->mark();
@@ -511,10 +511,12 @@ zaddress ZRelocate::relocate_object(ZForwarding* forwarding, zaddress_unsafe fro
   if (forwarding->retain_page(&_queue)) {
     assert(_generation->is_phase_relocate(), "Must be");
     // Fold a java.util.FastArrayList that forwards
-    const ZForwardingEntry fold = fast_list_fold(forwarding, safe(from_addr), &cursor);
-    if (fold.populated()) {
-      forwarding->release_page();
-      return forwarding_to_address(fold);
+    if (ZFastArrayListFolding::is_forwarding_list(safe(from_addr))) {
+      const ZForwardingEntry fold = fast_list_fold(forwarding, safe(from_addr), &cursor);
+      if (fold.populated()) {
+        forwarding->release_page();
+        return forwarding_to_address(fold);
+      }
     }
 
     to_addr = relocate_object_inner(forwarding, safe(from_addr), &cursor);
@@ -765,7 +767,7 @@ private:
     }
 
     // Fold a java.util.FastArrayList that forwards
-    {
+    if (ZFastArrayListFolding::is_forwarding_list(from_addr)) {
       const ZForwardingEntry entry = fast_list_fold(_forwarding, from_addr, &cursor);
       if (entry.populated()) {
         *fold = entry.is_fold();

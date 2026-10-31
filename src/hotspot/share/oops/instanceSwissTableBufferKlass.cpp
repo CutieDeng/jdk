@@ -30,6 +30,7 @@
 #include "jni.h"
 #include "logging/log.hpp"
 #include "memory/oopFactory.hpp"
+#include "oops/compressedOops.inline.hpp"
 #include "oops/instanceSwissTableBufferKlass.inline.hpp"
 #include "oops/objArrayOop.inline.hpp"
 #include "oops/oop.inline.hpp"
@@ -52,6 +53,7 @@
 InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_swiss     = { -1, false, -1, 1, 2 };
 InstanceSwissTableBufferKlass::Layout InstanceSwissTableBufferKlass::_fast_list = { -1, false, -1, 0, 1 };
 const Klass* InstanceSwissTableBufferKlass::_fast_list_klass = nullptr;
+juint InstanceSwissTableBufferKlass::_fast_list_fold_nklass = 0;
 int InstanceSwissTableBufferKlass::_aux_offset = -1;
 int InstanceSwissTableBufferKlass::_fast_list_size_offset = -1;
 int InstanceSwissTableBufferKlass::_fast_list_fwd_offset = -1;
@@ -116,6 +118,9 @@ void InstanceSwissTableBufferKlass::init_offsets() {
   guarantee(is_aligned(base, heapOopSize), "FastArrayList elements must be aligned");
   _fast_list.data_base = base;
   _fast_list_klass = f;
+  if (FastListFolding && UseCompressedClassPointers) {
+    _fast_list_fold_nklass = CompressedKlassPointers::encode_not_null(f);
+  }
 }
 
 JRT_LEAF(jboolean, InstanceSwissTableBufferKlass::store_fast_list_forward_leaf(oopDesc* list, oopDesc* storage))

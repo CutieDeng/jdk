@@ -482,13 +482,13 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
   }
 
   // Increment live
-  size_t live_size = 0;
   if (inc_live) {
     // Update live objects/bytes for page. We use the aligned object
     // size since that is the actual number of bytes used on the page
     // and alignment paddings can never be reclaimed.
     const size_t size = ZUtils::object_size(addr);
-    live_size = align_up(size, page->object_alignment());
+    const size_t aligned_size = align_up(size, page->object_alignment());
+    context->cache()->inc_live(page, aligned_size);
   }
 
   // Follow
@@ -500,10 +500,11 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
       if (inc_live && ZFastArrayListFolding::is_forwarding_list(addr) &&
           ZFastArrayListFolding::mark_excludes(addr, page)) {
         // A java.util.FastArrayList that relocation will likely fold into its storage (decided now
-        // that following it has healed its reference to the storage): live, but not in the live
-        // bytes of its page. (The test only here: other objects take no extra step.)
-        page->inc_fold_bytes(live_size);
-        live_size = 0;
+        // that following it has healed its reference to the storage): live, but its bytes move from
+        // the live bytes of its page to the fold bytes. (Only here: other objects take no extra step.)
+        const size_t aligned_size = align_up(ZUtils::object_size(addr), page->object_alignment());
+        page->inc_live(0, (size_t)0 - aligned_size);   // modular: the cache may add its bytes later
+        page->inc_fold_bytes(aligned_size);
       }
     } else {
       const oop obj = to_oop(addr);
@@ -514,11 +515,6 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
         try_deduplicate(context, obj);
       }
     }
-  }
-
-  if (inc_live) {
-    // (after following: the live bytes of a list that forwards depend on it)
-    context->cache()->inc_live(page, live_size);
   }
 }
 

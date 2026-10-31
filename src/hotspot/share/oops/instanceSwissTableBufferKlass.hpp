@@ -110,6 +110,7 @@ private:
   static Layout _swiss;                     // java.util.SwissTableBuffer
   static Layout _fast_list;                 // java.util.FastArrayList
   static const Klass* _fast_list_klass;     // set by init_offsets
+  static juint _fast_list_fold_nklass;      // the narrow klass of FastArrayList if a collector may fold, else 0
   static int _aux_offset;                   // SwissTableBuffer.aux
   static int _fast_list_size_offset;        // FastArrayList.size
   static int _fast_list_fwd_offset;         // FastArrayList.fwd
@@ -175,6 +176,10 @@ public:
   static oop repair_fast_list(Handle list);
   static const int fast_list_moves_capacity = 1024;   // moves per thread before a check
   static const Klass* fast_list_klass() { return _fast_list_klass; }
+  // The narrow klass of FastArrayList with FastListFolding and compressed class pointers, else 0
+  // (no object has the narrow klass 0): the test of generational ZGC for a list to fold, a compare
+  // of the narrow klass in the header of an object (zFastArrayListFolding.inline.hpp).
+  static juint fast_list_fold_nklass() { return _fast_list_fold_nklass; }
   // Sizes of a FastArrayList that does not hold its elements (FastArrayList.FORWARDED, RETIRED): the
   // list object that forwards to its storage (fwd), which a young collection may fold into the
   // storage (FastListFolding); and a storage that the elements left, which forwards too but is not
