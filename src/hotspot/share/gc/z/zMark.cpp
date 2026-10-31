@@ -482,20 +482,13 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
   }
 
   // Increment live
-  size_t fold_size = 0;
+  size_t live_size = 0;
   if (inc_live) {
     // Update live objects/bytes for page. We use the aligned object
     // size since that is the actual number of bytes used on the page
     // and alignment paddings can never be reclaimed.
     const size_t size = ZUtils::object_size(addr);
-    const size_t aligned_size = align_up(size, page->object_alignment());
-    if (ZFastArrayListFolding::is_forwarding_list(addr)) {
-      // A java.util.FastArrayList that relocation may fold: decided below, when following it has
-      // healed its reference to its storage
-      fold_size = aligned_size;
-    } else {
-      context->cache()->inc_live(page, aligned_size);
-    }
+    live_size = align_up(size, page->object_alignment());
   }
 
   // Follow
@@ -504,6 +497,14 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
       follow_array_object(objArrayOop(to_oop(addr)), finalizable);
     } else if (to_oop(addr)->klass()->is_swiss_table_buffer_instance_klass()) {
       follow_swiss_table_buffer(to_oop(addr), finalizable);
+      if (inc_live && ZFastArrayListFolding::is_forwarding_list(addr) &&
+          ZFastArrayListFolding::mark_excludes(addr, page)) {
+        // A java.util.FastArrayList that relocation will likely fold into its storage (decided now
+        // that following it has healed its reference to the storage): live, but not in the live
+        // bytes of its page. (The test only here: other objects take no extra step.)
+        page->inc_fold_bytes(live_size);
+        live_size = 0;
+      }
     } else {
       const oop obj = to_oop(addr);
       follow_object(obj, finalizable);
@@ -515,14 +516,9 @@ void ZMark::mark_and_follow(ZMarkContext* context, ZMarkStackEntry entry) {
     }
   }
 
-  if (fold_size != 0) {
-    if (ZFastArrayListFolding::mark_excludes(addr, page)) {
-      // Live, but not in the live bytes: relocation folds it into its storage
-      page->inc_fold_bytes(fold_size);
-      context->cache()->inc_live(page, 0);
-    } else {
-      context->cache()->inc_live(page, fold_size);
-    }
+  if (inc_live) {
+    // (after following: the live bytes of a list that forwards depend on it)
+    context->cache()->inc_live(page, live_size);
   }
 }
 
